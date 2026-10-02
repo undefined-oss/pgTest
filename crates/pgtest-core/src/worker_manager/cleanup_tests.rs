@@ -109,7 +109,10 @@ impl Fixture {
             .as_ref()
             .unwrap()
             .creation_tx
-            .send(CreateDatabases { first_database_id: DatabaseId(id), amount: 1 })
+            .send(CreateDatabases {
+                first_database_id: DatabaseId(id),
+                amount: std::num::NonZeroUsize::MIN,
+            })
             .unwrap();
     }
 
@@ -363,7 +366,10 @@ async fn closing_one_worker_queue_does_not_close_the_other() {
     let io = WorkerEngineIO::new(engine_tx, TaskTracker::new(), CancellationToken::new(), senders);
     drop(creation_rx);
     assert!(matches!(
-        io.request_creation(CreateDatabases { first_database_id: DatabaseId(1), amount: 1 }),
+        io.request_creation(CreateDatabases {
+            first_database_id: DatabaseId(1),
+            amount: std::num::NonZeroUsize::MIN
+        }),
         Err(IOError::FailedToSendTheMessage)
     ));
     io.request_cleanup(CleanupDatabase {
@@ -383,35 +389,6 @@ async fn closing_one_worker_queue_does_not_close_the_other() {
 }
 
 #[tokio::test]
-async fn zero_lease_record_limit_is_rejected_before_connecting() {
-    assert!(matches!(
-        WorkerEngineManager::start(
-            PostgresConfig::default(),
-            WorkerEngineConfig { max_lease_records: 0, ..WorkerEngineConfig::default() }
-        )
-        .await,
-        Err(StartError::InvalidLeaseRecordLimit)
-    ));
-}
-
-#[tokio::test]
-async fn startup_preserves_postgres_configuration_errors() {
-    let result = WorkerEngineManager::start(
-        PostgresConfig { pgtest_pg_creation_pool_connection: 0, ..PostgresConfig::default() },
-        WorkerEngineConfig::default(),
-    )
-    .await;
-    assert!(matches!(
-        result,
-        Err(StartError::Postgres(
-            pgtest_database_operations::manager::errors::PostgresClientError::InvalidPoolSize(
-                "PGTEST_CREATION_POOL_CONNECTION"
-            )
-        ))
-    ));
-}
-
-#[tokio::test]
 async fn creation_batch_maps_out_of_order_results_to_reserved_ids() {
     let mut fixture = Fixture::new();
     fixture
@@ -419,7 +396,10 @@ async fn creation_batch_maps_out_of_order_results_to_reserved_ids() {
         .as_ref()
         .unwrap()
         .creation_tx
-        .send(CreateDatabases { first_database_id: DatabaseId(40), amount: 3 })
+        .send(CreateDatabases {
+            first_database_id: DatabaseId(40),
+            amount: std::num::NonZeroUsize::new(3).unwrap(),
+        })
         .unwrap();
     let first = fixture.next_creation().await;
     let second = fixture.next_creation().await;

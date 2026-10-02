@@ -3,8 +3,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum PostgresClientError {
-    #[error("{0} must be greater than zero")]
-    InvalidPoolSize(&'static str),
     #[error("unable to connect to postgres at {0}")]
     UnableToConnectToPostgres(String),
     #[error("unable to fetch the postgres server version")]

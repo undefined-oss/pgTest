@@ -47,10 +47,6 @@ impl<P: PostgresClient + Send + Sync + 'static> DatabaseCreationWorker<P> {
                 }
             };
 
-            if request.amount == 0 {
-                continue;
-            }
-
             let postgres_manager = self.postgres_manager.clone();
             let engine_tx = self.engine_tx.clone();
             let shutdown = self.shutdown.clone();
@@ -75,7 +71,7 @@ impl<P: PostgresClient + Send + Sync + 'static> DatabaseCreationWorker<P> {
                 tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => {},
-                    () = postgres_manager.create_databases(request.amount, on_finished) => {},
+                    () = postgres_manager.create_databases(request.amount.get(), on_finished) => {},
                 }
             });
         }

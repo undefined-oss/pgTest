@@ -184,11 +184,11 @@ impl Default for PostgresConfig {
     fn default() -> Self {
         Self {
             pgtest_pg_database: String::from("pgtest"),
-            pgtest_pg_port: 5432,
+            pgtest_pg_port: std::num::NonZeroU16::new(5432).unwrap(),
             pgtest_pg_user: String::from("postgres"),
             pgtest_pg_host: String::from("localhost"),
-            pgtest_pg_creation_pool_connection: 5,
-            pgtest_pg_cleanup_pool_connection: 2,
+            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::new(5).unwrap(),
+            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::new(2).unwrap(),
         }
     }
 }
@@ -197,7 +197,11 @@ impl<'a> From<&'a Container<Postgres>> for PostgresConfig {
     fn from(value: &'a Container<Postgres>) -> Self {
         Self {
             pgtest_pg_host: value.get_host().unwrap().to_string(),
-            pgtest_pg_port: value.get_host_port_ipv4(ContainerPort::Tcp(5432)).unwrap(),
+            pgtest_pg_port: value
+                .get_host_port_ipv4(ContainerPort::Tcp(5432))
+                .unwrap()
+                .try_into()
+                .unwrap(),
             ..PostgresConfig::default()
         }
     }
@@ -217,7 +221,7 @@ pub async fn pg_container_config() -> PostgresConfig {
     config.pgtest_pg_database = format!("pgt{id:016x}");
     let (client, connection) = Config::new()
         .host(&config.pgtest_pg_host)
-        .port(config.pgtest_pg_port)
+        .port(config.pgtest_pg_port.get())
         .user(&config.pgtest_pg_user)
         .password("postgres")
         .dbname("postgres")
