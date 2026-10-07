@@ -1,0 +1,181 @@
+name: Build and publish Docker image
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Commit or server tag to build
+        type: string
+        required: true
+      server_tag:
+        description: Versioned server tag; empty for a nightly build
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Resolve source and version
+        id: source
+        env:
+          SERVER_TAG: ${{ inputs.server_tag }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          {
+            echo "sha=$sha"
+            echo "short_sha=${sha:0:12}"
+            echo "version=${SERVER_TAG#server-v}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=nightly,enable=${{ inputs.server_tag == '' }}
+            type=ref,event=branch,prefix=nightly-,enable=${{ inputs.server_tag == '' }}
+            type=raw,value=nightly-sha-${{ steps.source.outputs.short_sha }},enable=${{ inputs.server_tag == '' }}
+            type=raw,value=sha-${{ steps.source.outputs.short_sha }},enable=${{ inputs.server_tag != '' }}
+            type=raw,value=v${{ steps.source.outputs.version }},enable=${{ inputs.server_tag != '' }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=${{ inputs.server_tag != '' && steps.source.outputs.version || 'nightly' }}
+
+  build:
+    needs: prepare
+    name: Compile and verify (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-musl
+            elf_machine: Advanced Micro Devices X86-64
+          - arch: arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            target: aarch64-unknown-linux-musl
+            elf_machine: AArch64
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake musl-tools pkg-config binutils
+      - name: Install mold
+        uses: rui314/setup-mold@v1
+        with:
+          make-default: false
+      - name: Install pinned Rust toolchain and musl target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup show active-toolchain
+          rustup target add "$TARGET"
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docker-release-${{ matrix.target }}
+          cache-bin: false
+      - name: Compile and stage static server
+        env:
+          PGTEST_OUTPUT_DIR: ${{ runner.temp }}/docker-context/${{ matrix.arch }}
+        run: |
+          sh scripts/docker-build.sh build
+          echo "PGTEST_OUTPUT_DIR=$PGTEST_OUTPUT_DIR" >> "$GITHUB_ENV"
+      - name: Verify architecture and runtime permissions
+        env:
+          ELF_MACHINE: ${{ matrix.elf_machine }}
+          LC_ALL: C
+        run: |
+          readelf -h "$PGTEST_OUTPUT_DIR/usr/local/bin/pgtest-server" | grep -F "$ELF_MACHINE"
+          test "$(stat -c '%a' "$PGTEST_OUTPUT_DIR/usr/local/bin/pgtest-server")" = 755
+          test "$(stat -c '%a' "$PGTEST_OUTPUT_DIR/tmp")" = 1777
+      - name: Package and smoke-test native scratch image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker build --platform "linux/$ARCH" -f Dockerfile.cd -t pgtest-cd:verify "$RUNNER_TEMP/docker-context"
+          sh scripts/docker-smoke-test.sh pgtest-cd:verify
+      - name: Archive runtime filesystem
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: tar -C "$PGTEST_OUTPUT_DIR" -cf "$RUNNER_TEMP/rootfs-$ARCH.tar" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server-rootfs-${{ matrix.arch }}
+          path: ${{ runner.temp }}/rootfs-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, build]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: server-rootfs-*
+          path: ${{ runner.temp }}/rootfs-artifacts
+          merge-multiple: true
+      - name: Prepare image context
+        run: |
+          for arch in amd64 arm64; do
+            rootfs="$RUNNER_TEMP/docker-context/$arch"
+            mkdir -p "$rootfs"
+            tar --same-permissions -xf "$RUNNER_TEMP/rootfs-artifacts/rootfs-$arch.tar" -C "$rootfs"
+            test "$(stat -c '%a' "$rootfs/usr/local/bin/pgtest-server")" = 755
+            test "$(stat -c '%a' "$rootfs/tmp")" = 1777
+          done
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish multi-platform scratch image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/docker-context
+          file: Dockerfile.cd
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ needs.prepare.outputs.tags }}
+          labels: ${{ needs.prepare.outputs.labels }}
+      - name: Verify published platforms
+        env:
+          IMAGE_TAGS: ${{ needs.prepare.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          tag=$(printf '%s\n' "$IMAGE_TAGS" | head -n 1)
+          docker buildx imagetools inspect "$tag@$IMAGE_DIGEST" --raw > "$RUNNER_TEMP/manifest.json"
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | unique | sort == ["amd64", "arm64"]' "$RUNNER_TEMP/manifest.json"

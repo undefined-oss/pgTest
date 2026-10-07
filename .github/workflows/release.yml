@@ -15,11 +15,10 @@ concurrency:
 jobs:
   tests:
     if: >-
-      github.repository == 'Afsoon/pgTest' &&
+      github.repository == 'undefined-oss/pgTest' &&
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'release-plz-')
-    cache-mode: write
     uses: ./.github/workflows/tests.yml
     with:
       source_sha: ${{ github.event.pull_request.merge_commit_sha }}
@@ -71,49 +70,10 @@ jobs:
   docker:
     needs: tags
     if: needs.tags.outputs.server_tag != ''
-    runs-on: ubuntu-24.04
-    cache-mode: write
+    uses: ./.github/workflows/docker-publish.yml
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.tags.outputs.server_tag }}
-          persist-credentials: false
-      - name: Read image version and commit
-        id: image
-        env:
-          SERVER_TAG: ${{ needs.tags.outputs.server_tag }}
-        run: |
-          sha=$(git rev-parse HEAD)
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
-          echo "version=${SERVER_TAG#server-v}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ghcr.io/afsoon/pgtest
-          flavor: latest=false
-          tags: |
-            type=raw,value=sha-${{ steps.image.outputs.short_sha }}
-            type=raw,value=v${{ steps.image.outputs.version }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.image.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.image.outputs.version }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    with:
+      source_ref: ${{ needs.tags.outputs.server_tag }}
+      server_tag: ${{ needs.tags.outputs.server_tag }}
