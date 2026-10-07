@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish = false
 description = "Isolated PostgreSQL databases for integration tests"
-homepage = "https://github.com/Afsoon/pgTest#readme"
+homepage = "https://github.com/undefined-oss/pgTest#readme"
 
 [[bin]]
 name = "pgtest"

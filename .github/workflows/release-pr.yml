@@ -14,8 +14,8 @@ concurrency:
 
 jobs:
   prepare:
-    if: github.repository == 'Afsoon/pgTest'
-    runs-on: ubuntu-24.04
+    if: github.repository == 'undefined-oss/pgTest'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
         with:
