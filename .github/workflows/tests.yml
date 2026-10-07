@@ -26,8 +26,49 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  changed:
+    name: Check changed files
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run_tests: ${{ steps.filter.outputs.run_tests }}
+    steps:
+      # Pull request changes are read through the API, without a checkout.
+      - name: Check out repository
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Resolve manual comparison
+        if: github.event_name == 'workflow_dispatch'
+        id: parent
+        run: |
+          if parent=$(git rev-parse --verify HEAD^ 2>/dev/null); then
+            echo "sha=$parent" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Examine changed files
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # For pushes, compare with the previous push on this branch.
+          # For manual runs, inspect the selected commit. Ignored for PRs.
+          base: ${{ steps.parent.outputs.sha || github.ref }}
+          ref: ${{ steps.parent.outputs.sha != '' && (inputs.source_sha || github.sha) || github.ref }}
+          filters: |
+            run_tests:
+              - '**/*.rs'
+
   test:
     name: Workspace tests
+    needs: changed
+    if: needs.changed.outputs.run_tests == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:

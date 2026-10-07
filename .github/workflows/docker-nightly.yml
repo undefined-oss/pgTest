@@ -15,6 +15,9 @@ concurrency:
 jobs:
   tests:
     uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+      pull-requests: read
     with:
       source_sha: ${{ github.sha }}
 

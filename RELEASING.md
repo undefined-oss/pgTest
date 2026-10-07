@@ -14,7 +14,7 @@ that depend on them. Nothing is published to crates.io.
 1. Review and merge the release-plz PR. Use Conventional Commit titles for code
    changes so release-plz can determine the next versions.
 2. Merging the PR into `main` automatically starts **Publish**, which runs nextest
-   and doctests against that PR's merge commit. The PR must come from a
+   and doctests when that PR changes `.rs` files. The PR must come from a
    `release-plz-*` branch in this repository.
 3. Release-plz creates the pending `cli-v<version>`, `server-v<version>`, and
    `internals-v<version>` tags. The internal tag is a version baseline only.
@@ -46,7 +46,8 @@ Open **Actions → Docker nightly → Run workflow**, select the branch to build
 and click **Run workflow**. The workflow must be present on the default branch
 to appear in the UI and on the selected branch to run there.
 
-The workflow runs the existing tests against the selected commit, then publishes
+The workflow runs the existing tests when the selected commit changes `.rs`
+files, then publishes
 `linux/amd64` and `linux/arm64` images to `ghcr.io/<owner>/pgtest`, using the
 repository's current owner. It publishes these tags:
 
@@ -100,6 +101,12 @@ Downloaded macOS binaries may require explicit user approval. The root
 [README](README.md#macos-releases) documents this limitation.
 
 ## Validation and retries
+
+Workspace tests and doctests run only for `.rs` changes, including additions,
+deletions and renames. PR checks compare the full PR diff; pushes to `main`
+compare the complete pushed range. A separate `changed` job uses
+`dorny/paths-filter` and skips the entire test job for other changes, allowing
+releases to continue without installing test tools or compiling the workspace. Manifest, lockfile, documentation and workflow changes alone skip tests.
 
 Run **Release** with its default `dry-run` tag to build the CLI artifacts
 without publishing. PRs also check cargo-dist's release plan.
