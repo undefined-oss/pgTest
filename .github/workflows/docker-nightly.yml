@@ -1,0 +1,28 @@
+name: Docker nightly
+run-name: Docker nightly from ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize publication because every branch updates the shared nightly tag.
+concurrency:
+  group: docker-nightly
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    with:
+      source_sha: ${{ github.sha }}
+
+  docker:
+    needs: tests
+    uses: ./.github/workflows/docker-publish.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      source_ref: ${{ github.sha }}

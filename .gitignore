@@ -15,9 +15,11 @@
 !.config/nextest.toml
 !rust-toolchain.toml
 !Dockerfile
+!Dockerfile.cd
 !.dockerignore
 !scripts/
 !scripts/docker-build.sh
+!scripts/docker-smoke-test.sh
 !LICENSE-APACHE
 !LICENSE-MIT
 

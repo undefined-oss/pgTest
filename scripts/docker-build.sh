@@ -29,6 +29,7 @@ if readelf -l "$binary" | grep -q INTERP || readelf -d "$binary" | grep -q NEEDE
     exit 1
 fi
 
-install -D -m 0755 "$binary" /out/usr/local/bin/pgtest-server
+output_dir="${PGTEST_OUTPUT_DIR:-/out}"
+install -D -m 0755 "$binary" "$output_dir/usr/local/bin/pgtest-server"
 # Preserve a writable /tmp for the non-root scratch runtime.
-install -d -m 1777 /out/tmp
+install -d -m 1777 "$output_dir/tmp"

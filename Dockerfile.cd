@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+# Context: prepared runtime files under amd64/ and arm64/.
+FROM scratch
+ARG TARGETARCH
+COPY ${TARGETARCH}/ /
+USER 65532:65532
+WORKDIR /tmp
+ENV PGTEST_LISTEN_ADDR=0.0.0.0
+ENV PGTEST_LISTEN_PORT=6432
+EXPOSE 6432
+STOPSIGNAL SIGINT
+ENTRYPOINT ["/usr/local/bin/pgtest-server"]
