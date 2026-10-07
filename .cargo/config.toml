@@ -6,3 +6,13 @@ rustflags = ["-Znext-solver"]
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))']
 linker = "gcc"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Target used to compile a self-contained binary to be used in scratch images
+[target.'cfg(all(target_os = "linux", target_env = "musl"))']
+linker = "musl-gcc"
+# musl-gcc's specs inject an interpreter even for static links with mold.
+rustflags = [
+    "-C", "link-arg=-fuse-ld=mold",
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-Wl,--no-dynamic-linker",
+]
