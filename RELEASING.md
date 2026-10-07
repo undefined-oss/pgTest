@@ -39,6 +39,28 @@ The CLI embeds its version and full source commit at build time. Both publishers
 build the tags created by release-plz, so later changes to `main` are excluded.
 Prereleases do not update Homebrew.
 
+## Manual Docker nightly
+
+Open **Actions → Docker nightly → Run workflow**, select the branch to build,
+and click **Run workflow**. The workflow must be present on the default branch
+to appear in the UI and on the selected branch to run there.
+
+The workflow runs the existing tests against the selected commit, then publishes
+`linux/amd64` and `linux/arm64` images to `ghcr.io/<owner>/pgtest`, using the
+repository's current owner. It publishes these tags:
+
+- `nightly`: the most recently published manual nightly from any branch.
+- `nightly-<branch>`: the latest nightly for that branch; Docker metadata replaces
+  unsupported tag characters, such as `/`, with `-`.
+- `nightly-sha-<12-character-commit>`: the image for the selected commit.
+
+Versioned release tags are unchanged. This workflow has no automatic schedule.
+To trigger it from the CLI:
+
+```sh
+gh workflow run docker-nightly.yml --ref your-branch
+```
+
 ## macOS signing and notarization
 
 Developer ID signing and notarization are not part of the release plan or

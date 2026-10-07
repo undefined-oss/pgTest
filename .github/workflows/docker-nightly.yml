@@ -1,0 +1,67 @@
+name: Docker nightly
+run-name: Docker nightly from ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize publication because every branch updates the shared nightly tag.
+concurrency:
+  group: docker-nightly
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    with:
+      source_sha: ${{ github.sha }}
+
+  docker:
+    needs: tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out selected commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Generate nightly image tags
+        uses: docker/metadata-action@v5
+        id: meta
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: 12
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=nightly
+            type=ref,event=branch,prefix=nightly-
+            type=sha,prefix=nightly-sha-
+
+      - name: Build and publish nightly image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=docker-nightly
+          cache-to: type=gha,scope=docker-nightly,mode=max
