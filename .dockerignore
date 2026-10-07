@@ -6,6 +6,8 @@
 !rust-toolchain.toml
 !.cargo/
 !.cargo/config.toml
+!scripts/
+!scripts/docker-build.sh
 !crates/
 !crates/**/
 !crates/**/Cargo.toml

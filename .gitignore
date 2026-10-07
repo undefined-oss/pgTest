@@ -16,6 +16,8 @@
 !rust-toolchain.toml
 !Dockerfile
 !.dockerignore
+!scripts/
+!scripts/docker-build.sh
 !LICENSE-APACHE
 !LICENSE-MIT
 
