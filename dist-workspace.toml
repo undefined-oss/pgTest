@@ -23,8 +23,9 @@ precise-builds = true
 install-path = "CARGO_HOME"
 install-updater = false
 
+# Explicit host triples let cargo-dist resolve custom runner architectures.
 [dist.github-custom-runners]
-global = "ubuntu-24.04"
-aarch64-apple-darwin = "macos-15"
-aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
-x86_64-unknown-linux-musl = "ubuntu-24.04"
+global = { runner = "blacksmith-2vcpu-ubuntu-2404", host = "x86_64-unknown-linux-gnu" }
+aarch64-apple-darwin = { runner = "blacksmith-6vcpu-macos-15", host = "aarch64-apple-darwin" }
+aarch64-unknown-linux-musl = { runner = "blacksmith-4vcpu-ubuntu-2404-arm", host = "aarch64-unknown-linux-gnu" }
+x86_64-unknown-linux-musl = { runner = "blacksmith-4vcpu-ubuntu-2404", host = "x86_64-unknown-linux-gnu" }

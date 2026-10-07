@@ -1,7 +1,7 @@
 # PgTest
 
-[![CI](https://github.com/Afsoon/pgTest/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Afsoon/pgTest/actions/workflows/tests.yml)
-[![CD](https://github.com/Afsoon/pgTest/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Afsoon/pgTest/actions/workflows/release.yml)
+[![CI](https://github.com/undefined-oss/pgTest/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/undefined-oss/pgTest/actions/workflows/tests.yml)
+[![CD](https://github.com/undefined-oss/pgTest/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/undefined-oss/pgTest/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Rust: nightly](https://img.shields.io/badge/rust-nightly-orange)](rust-toolchain.toml)
 
@@ -93,16 +93,16 @@ pgtest version
 
 ### Docker image
 
-The image is available at `ghcr.io/afsoon/pgtest` for Linux ARM64 and x86_64.
+The image is available at `ghcr.io/undefined-oss/pgtest` for Linux ARM64 and x86_64.
 **Prefer the commit-hash tag over the version tag** to identify the exact source
 commit used to build the image. Replace `<12-character-commit>` with the first
 12 characters of the released server commit:
 
 ```sh
-docker pull 'ghcr.io/afsoon/pgtest:sha-<12-character-commit>'
+docker pull 'ghcr.io/undefined-oss/pgtest:sha-<12-character-commit>'
 ```
 
-Version tags such as `ghcr.io/afsoon/pgtest:v0.1.0` are also available. Each release
+Version tags such as `ghcr.io/undefined-oss/pgtest:v0.1.0` are also available. Each release
 publishes both tags for the same image.
 
 ### macOS releases
@@ -151,7 +151,7 @@ docker run --rm --name pgtest \
   -e PGTEST_PG_PORT=5432 \
   -e PGTEST_PG_USER=postgres \
   -e PGTEST_PG_DATABASE=test_template \
-  'ghcr.io/afsoon/pgtest:sha-<12-character-commit>'
+  'ghcr.io/undefined-oss/pgtest:sha-<12-character-commit>'
 ```
 
 This example connects to PostgreSQL on the Docker host. PostgreSQL must listen on
