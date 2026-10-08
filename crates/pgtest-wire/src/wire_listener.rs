@@ -252,11 +252,11 @@ mod listener_test {
             std::fs::create_dir(&upstream_directory).unwrap();
             let listener = crate::unix_listener::BoundUnixListener::bind(
                 &upstream_directory,
-                pg_config.pgtest_pg_port.get(),
+                pg_config.pgtest_pg_port.port(),
             )
             .unwrap();
             let host = pg_config.pgtest_pg_host.clone();
-            let port = pg_config.pgtest_pg_port.get();
+            let port = pg_config.pgtest_pg_port.port();
             bridge_tasks.spawn(async move {
                 let mut sessions = tokio::task::JoinSet::new();
                 loop {
@@ -273,7 +273,7 @@ mod listener_test {
                     }
                 }
             });
-            pg_config.pgtest_pg_host = upstream_directory.to_str().unwrap().to_owned();
+            pg_config.pgtest_pg_host = upstream_directory.to_str().unwrap().parse().unwrap();
         }
         let template = pg_config.pgtest_pg_database.clone();
         let engine = Arc::new(
@@ -376,7 +376,7 @@ mod listener_test {
             .unwrap();
         assert_eq!(row.get::<_, i32>("x"), 1);
         let database: &str = row.get("database");
-        assert_ne!(database, template_database);
+        assert_ne!(database, template_database.as_str());
         assert!(database.starts_with(&format!("{template_database}_")));
 
         drop(client);

@@ -39,7 +39,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
             let listener = wire_listener::run_unix_on_port(
                 engine.clone(),
                 directory,
-                options.unix_socket_port.map_or(6432, std::num::NonZeroU16::get),
+                options.unix_socket_port.unwrap_or_default().get(),
             )
             .await
             .context("failed to start Unix listener")?;

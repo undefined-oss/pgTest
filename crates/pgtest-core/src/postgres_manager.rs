@@ -62,7 +62,7 @@ mod tests {
     #[tokio::test]
     async fn batch_reports_each_success_and_failure_once() {
         let manager = PostgresManager::start(PostgresConfig {
-            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN,
+            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN.into(),
             ..pg_container_config().await
         })
         .await

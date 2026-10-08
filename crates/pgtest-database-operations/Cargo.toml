@@ -10,6 +10,7 @@ publish = false
 workspace = true
 
 [dependencies]
+derive_more = { workspace = true, features = ["full"] }
 hotpath = { workspace = true }
 tokio-postgres = "0.7.18"
 deadpool-postgres = "0.14.2"

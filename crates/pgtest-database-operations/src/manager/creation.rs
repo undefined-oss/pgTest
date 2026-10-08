@@ -1,12 +1,12 @@
-use std::num::NonZeroUsize;
-
 use futures_util::{StreamExt, stream};
+
+use super::config::CreationPoolSize;
 
 // The window bounds pending futures per batch. Each operation checks out its
 // own connection, so the shared pool also bounds execution across batches.
 pub(super) fn run_bounded<F, T>(
     amount: usize,
-    limit: NonZeroUsize,
+    limit: CreationPoolSize,
     mut create: impl FnMut(usize) -> F + Send,
     mut on_result: impl FnMut(usize, T) + Send,
 ) -> impl Future<Output = ()> + Send
@@ -46,7 +46,7 @@ mod tests {
         let mut receivers = receivers.into_iter();
         let batch = run_bounded(
             5,
-            std::num::NonZeroUsize::new(2).unwrap(),
+            std::num::NonZeroUsize::new(2).unwrap().into(),
             |index| {
                 started.lock().unwrap().push(index);
                 let receiver = receivers.next().unwrap();
@@ -79,7 +79,7 @@ mod tests {
         let mut senders = Vec::new();
         let batch = run_bounded(
             5,
-            std::num::NonZeroUsize::new(2).unwrap(),
+            std::num::NonZeroUsize::new(2).unwrap().into(),
             |_| {
                 let (sender, receiver) = oneshot::channel::<()>();
                 senders.push(sender);

@@ -14,6 +14,7 @@ name = "pgtest"
 workspace = true
 
 [dependencies]
+derive_more = { workspace = true, features = ["full"] }
 hotpath = { workspace = true }
 rand = "0.10.2"
 rustc-hash = "2.1.3"

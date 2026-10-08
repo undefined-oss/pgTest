@@ -1,7 +1,4 @@
-use std::{
-    num::{NonZeroU16, NonZeroUsize},
-    time::Duration,
-};
+use std::{num::NonZeroUsize, time::Duration};
 
 use deadpool_postgres::{Client, Config, Pool, PoolConfig, PoolError, Runtime, Timeouts};
 use futures_util::{StreamExt, future::join_all, stream::FuturesUnordered};
@@ -9,7 +6,7 @@ use pgtest_utils::read_string::ReadString;
 use tokio_postgres::NoTls;
 
 use crate::manager::{
-    config::PostgresConfig,
+    config::{CreationPoolSize, PostgresConfig, PostgresUpstreamPort},
     database_name::PostgresDatabaseName,
     errors::{PostgresClientError, PostgresOperationsError},
 };
@@ -23,10 +20,10 @@ mod sql_profile;
 pub struct PostgresManager {
     pub version: u8,
     pub host: String,
-    pub port: NonZeroU16,
+    pub port: PostgresUpstreamPort,
     pub template_database_name: PostgresDatabaseName,
     create_pool: Pool,
-    creation_concurrency: NonZeroUsize,
+    creation_concurrency: CreationPoolSize,
     cleanup_pool: Pool,
 }
 
@@ -37,9 +34,9 @@ const CLEANUP_PIPELINE_DEPTH: usize = 32;
 impl From<&PostgresConfig> for Config {
     fn from(value: &PostgresConfig) -> Self {
         let mut config = Config::new();
-        config.host = Some(value.pgtest_pg_host.clone());
-        config.port = Some(value.pgtest_pg_port.get());
-        config.user = Some(value.pgtest_pg_user.clone());
+        config.host = Some(value.pgtest_pg_host.clone().into());
+        config.port = Some(*value.pgtest_pg_port);
+        config.user = Some(value.pgtest_pg_user.clone().into());
         config.password = Some(String::from("postgres"));
         config.dbname = Some(String::from("postgres"));
         config
@@ -49,9 +46,12 @@ impl From<&PostgresConfig> for Config {
 #[hotpath::measure_all]
 impl PostgresManager {
     pub async fn start(config: PostgresConfig) -> Result<Self, PostgresClientError> {
-        let create_pool =
-            Self::connect_pool(&config, config.pgtest_pg_creation_pool_connection, "creation")
-                .await?;
+        let create_pool = Self::connect_pool(
+            &config,
+            config.pgtest_pg_creation_pool_connection.into(),
+            "creation",
+        )
+        .await?;
         let validation = async {
             Self::database_exists(&create_pool, &config.pgtest_pg_database).await?;
             Self::is_valid_version(&create_pool).await
@@ -64,24 +64,27 @@ impl PostgresManager {
                 return Err(error);
             }
         };
-        let cleanup_pool =
-            match Self::connect_pool(&config, config.pgtest_pg_cleanup_pool_connection, "cleanup")
-                .await
-            {
-                Ok(pool) => pool,
-                Err(error) => {
-                    create_pool.close();
-                    return Err(error);
-                }
-            };
+        let cleanup_pool = match Self::connect_pool(
+            &config,
+            config.pgtest_pg_cleanup_pool_connection.into(),
+            "cleanup",
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => {
+                create_pool.close();
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             version,
             create_pool,
             creation_concurrency: config.pgtest_pg_creation_pool_connection,
             cleanup_pool,
-            template_database_name: PostgresDatabaseName::new(config.pgtest_pg_database),
-            host: config.pgtest_pg_host,
+            template_database_name: PostgresDatabaseName::new(config.pgtest_pg_database.into()),
+            host: config.pgtest_pg_host.into(),
             port: config.pgtest_pg_port,
         })
     }
@@ -334,8 +337,8 @@ mod postgres_manager_test {
     #[tokio::test]
     async fn cleanup_and_creation_have_independent_connection_capacity() {
         let config = PostgresConfig {
-            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN,
-            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN,
+            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN.into(),
+            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN.into(),
             ..pg_container_config().await
         };
         let manager = PostgresManager::start(config).await.unwrap();
@@ -388,7 +391,7 @@ mod postgres_manager_test {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let config = PostgresConfig {
-            pgtest_pg_host: "127.0.0.1".into(),
+            pgtest_pg_host: "127.0.0.1".parse().unwrap(),
             pgtest_pg_port: port.try_into().unwrap(),
             ..PostgresConfig::default()
         };
@@ -401,8 +404,8 @@ mod postgres_manager_test {
     #[tokio::test]
     async fn pipelined_cleanup_works_with_one_connection_and_quoted_names() {
         let config = PostgresConfig {
-            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN,
-            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN,
+            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN.into(),
+            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN.into(),
             ..pg_container_config().await
         };
         let manager = PostgresManager::start(config).await.unwrap();
@@ -465,7 +468,7 @@ mod postgres_manager_test {
     #[tokio::test]
     async fn cleanup_batch_reports_every_result_and_drains_failures_on_one_connection() {
         let manager = PostgresManager::start(PostgresConfig {
-            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN,
+            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::MIN.into(),
             ..pg_container_config().await
         })
         .await
@@ -555,7 +558,7 @@ mod postgres_manager_test {
     #[tokio::test]
     async fn bounded_creation_with_one_connection_and_quoted_names_recovers_from_errors() {
         let mut manager = PostgresManager::start(PostgresConfig {
-            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN,
+            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN.into(),
             ..pg_container_config().await
         })
         .await
@@ -623,7 +626,7 @@ mod postgres_manager_test {
     #[tokio::test]
     async fn overlapping_creation_batches_and_single_create_share_pool_capacity() {
         let manager = PostgresManager::start(PostgresConfig {
-            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::new(2).unwrap(),
+            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::new(2).unwrap().into(),
             ..pg_container_config().await
         })
         .await

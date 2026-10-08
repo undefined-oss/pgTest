@@ -29,7 +29,7 @@ Use `just cli::build dev dev` or `just build dev dev` for development. Direct Ca
 builds default each value to `dev` when its environment variable is unset or
 empty. Changing these variables at runtime does not change the reported metadata.
 
-All four upstream arguments are required. Choose TCP, a Unix socket, or both:
+The upstream host, user, and database arguments are required; `--pg-port` defaults to `5432`. Choose TCP, a Unix socket, or both:
 
 ```sh
 # TCP only

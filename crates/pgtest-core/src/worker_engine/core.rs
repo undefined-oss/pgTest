@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Instant,
 };
 
+use derive_more::{Deref, Display, From, FromStr, Into};
 use envconfig::Envconfig;
 use pgtest_utils::read_string::ReadString;
 use rustc_hash::FxHashMap;
@@ -15,14 +16,41 @@ use crate::worker_engine::{
     traits::{ConsumerIO, EngineIO, EngineInbox, PostgresClient},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deref, Display, From, FromStr, Into)]
+pub struct InitialSlots(u16);
+
+impl Default for InitialSlots {
+    fn default() -> Self {
+        Self(16)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deref, Display, From, FromStr, Into)]
+pub struct StarvationThreshold(u16);
+
+impl Default for StarvationThreshold {
+    fn default() -> Self {
+        Self(8)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deref, Display, From, FromStr, Into)]
+pub struct GrowBatchSize(u16);
+
+impl Default for GrowBatchSize {
+    fn default() -> Self {
+        Self(16)
+    }
+}
+
 #[derive(Envconfig, Debug, Clone, Copy)]
 pub struct WorkerEngineConfig {
     #[envconfig(from = "PGTEST_POOL_INITIAL_SIZE", default = "16")]
-    pub initial_slots: u16,
+    pub initial_slots: InitialSlots,
     #[envconfig(from = "PGTEST_POOL_STARVATION_THRESHOLD", default = "8")]
-    pub starvation_threshold: u16,
+    pub starvation_threshold: StarvationThreshold,
     #[envconfig(from = "PGTEST_POOL_GROW_BATCH_SIZE", default = "16")]
-    pub grow_batch_size: u16,
+    pub grow_batch_size: GrowBatchSize,
 
     #[envconfig(from = "PGTEST_LEASE_CLAIM_TIMEOUT_MS", default = "30000")]
     pub lease_claim_timeout_ms: u64,
@@ -117,7 +145,7 @@ where
     #[hotpath::measure]
     pub async fn try_init(&mut self) -> Result<(), PostgresDDLClientError> {
         let Some(request) =
-            self.inventory.reserve_creations(usize::from(self.config.initial_slots))
+            self.inventory.reserve_creations(usize::from(*self.config.initial_slots))
         else {
             return Ok(());
         };
@@ -408,7 +436,7 @@ where
     }
 
     pub(crate) fn grow(&mut self) {
-        let batch_size = usize::from(self.config.grow_batch_size);
+        let batch_size = usize::from(*self.config.grow_batch_size);
         if batch_size == 0 {
             return;
         }
@@ -427,7 +455,7 @@ where
             .count();
         // Preserve the inclusive starvation threshold after covering live
         // leases.
-        let required = waiting + usize::from(self.config.starvation_threshold) + 1;
+        let required = waiting + usize::from(*self.config.starvation_threshold) + 1;
 
         let deficit = required.saturating_sub(self.inventory.supply_len());
 
@@ -476,9 +504,9 @@ where
 impl Default for WorkerEngineConfig {
     fn default() -> Self {
         Self {
-            initial_slots: 4,
-            starvation_threshold: 2,
-            grow_batch_size: 4,
+            initial_slots: 4.into(),
+            starvation_threshold: 2.into(),
+            grow_batch_size: 4.into(),
 
             lease_claim_timeout_ms: 30_000,
             max_lease_records: std::num::NonZeroUsize::new(100_000).unwrap(),
@@ -491,6 +519,30 @@ mod config_tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn pool_settings_defaults_and_bounds_match_configuration() {
+        let config = WorkerEngineConfig::init_from_hashmap(&HashMap::new()).unwrap();
+        assert_eq!(config.initial_slots, InitialSlots::default());
+        assert_eq!(config.starvation_threshold, StarvationThreshold::default());
+        assert_eq!(config.grow_batch_size, GrowBatchSize::default());
+
+        for variable in [
+            "PGTEST_POOL_INITIAL_SIZE",
+            "PGTEST_POOL_STARVATION_THRESHOLD",
+            "PGTEST_POOL_GROW_BATCH_SIZE",
+        ] {
+            for invalid in ["-1", "65536", "invalid"] {
+                let vars = HashMap::from([(variable.to_owned(), invalid.to_owned())]);
+                assert!(
+                    WorkerEngineConfig::init_from_hashmap(&vars).is_err(),
+                    "{variable}={invalid}"
+                );
+            }
+            let vars = HashMap::from([(variable.to_owned(), "65535".to_owned())]);
+            assert!(WorkerEngineConfig::init_from_hashmap(&vars).is_ok(), "{variable}=65535");
+        }
+    }
 
     #[test]
     fn lease_record_limit_must_be_positive() {
@@ -517,9 +569,9 @@ mod config_tests {
         .map(|key| (key.to_owned(), "0".to_owned()))
         .collect();
         let config = WorkerEngineConfig::init_from_hashmap(&vars).unwrap();
-        assert_eq!(config.initial_slots, 0);
-        assert_eq!(config.starvation_threshold, 0);
-        assert_eq!(config.grow_batch_size, 0);
+        assert_eq!(*config.initial_slots, 0);
+        assert_eq!(*config.starvation_threshold, 0);
+        assert_eq!(*config.grow_batch_size, 0);
         assert_eq!(config.lease_claim_timeout_ms, 0);
         assert_eq!(config.max_lease_records.get(), 100_000);
     }

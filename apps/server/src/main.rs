@@ -2,30 +2,30 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::{
-    net::{IpAddr, SocketAddr},
-    num::NonZeroU16,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use envconfig::Envconfig;
 use pgtest::{worker_engine::core::WorkerEngineConfig, worker_manager::WorkerEngineManager};
 use pgtest_database_operations::manager::config::PostgresConfig;
-use pgtest_pg_wire::wire_listener;
+use pgtest_pg_wire::{
+    listener_addr::ListenAddr,
+    listener_port::{SocketListenerPort, TCPListenerPort},
+    unix_socket_dir::UnixSocketDir,
+    wire_listener,
+};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 #[derive(Envconfig)]
 struct ServerConfig {
     #[envconfig(from = "PGTEST_LISTEN_ADDR", default = "127.0.0.1")]
-    listen_addr: IpAddr,
+    listen_addr: ListenAddr,
     #[envconfig(from = "PGTEST_LISTEN_PORT", default = "6432")]
-    listen_port: u16,
+    listen_port: TCPListenerPort,
     #[envconfig(from = "PGTEST_UNIX_SOCKET_DIR")]
-    unix_socket_dir: Option<PathBuf>,
+    unix_socket_dir: Option<UnixSocketDir>,
     #[envconfig(from = "PGTEST_UNIX_SOCKET_PORT", default = "6432")]
-    unix_socket_port: NonZeroU16,
+    unix_socket_port: SocketListenerPort,
 }
 
 #[tokio::main]
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     );
     let address = wire_listener::run(
         engine.clone(),
-        SocketAddr::new(server_config.listen_addr, server_config.listen_port),
+        SocketAddr::new(server_config.listen_addr.into(), server_config.listen_port.get()),
     )
     .await
     .context("failed to start wire listener")?;
@@ -92,15 +92,16 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, net::IpAddr, path::PathBuf};
 
     use super::*;
 
     #[test]
     fn default_listener_stays_on_loopback() {
         let config = ServerConfig::init_from_hashmap(&HashMap::new()).unwrap();
-        assert_eq!(config.listen_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
-        assert_eq!(config.listen_port, 6432);
+        assert_eq!(*config.listen_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(config.listen_addr, ListenAddr::default());
+        assert_eq!(config.listen_port.get(), 6432);
         assert_eq!(config.unix_socket_port.get(), 6432);
     }
 
@@ -112,8 +113,8 @@ mod tests {
                 ("PGTEST_LISTEN_PORT".to_owned(), "0".to_owned()),
             ]);
             let config = ServerConfig::init_from_hashmap(&vars).unwrap();
-            assert_eq!(config.listen_addr, address.parse::<IpAddr>().unwrap());
-            assert_eq!(config.listen_port, 0);
+            assert_eq!(*config.listen_addr, address.parse::<IpAddr>().unwrap());
+            assert_eq!(config.listen_port.get(), 0);
         }
     }
 
@@ -134,9 +135,9 @@ mod tests {
             ("PGTEST_UNIX_SOCKET_PORT".to_owned(), "7432".to_owned()),
         ]);
         let config = ServerConfig::init_from_hashmap(&vars).unwrap();
-        assert_eq!(config.listen_port, 8432);
+        assert_eq!(config.listen_port.get(), 8432);
         assert_eq!(config.unix_socket_port.get(), 7432);
-        assert_eq!(config.unix_socket_dir, Some(PathBuf::from("/tmp/pgtest")));
+        assert_eq!(config.unix_socket_dir, Some(PathBuf::from("/tmp/pgtest").into()));
     }
 
     #[test]

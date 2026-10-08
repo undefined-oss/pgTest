@@ -17,6 +17,7 @@ use testcontainers::{
 };
 use tokio_postgres::{Config, NoTls};
 
+use crate::manager::config::PostgresUpstreamPort;
 #[cfg(any(test, feature = "test-support"))]
 use crate::manager::{config::PostgresConfig, database_name::PostgresDatabaseName};
 
@@ -183,12 +184,12 @@ impl Image for Postgres {
 impl Default for PostgresConfig {
     fn default() -> Self {
         Self {
-            pgtest_pg_database: String::from("pgtest"),
-            pgtest_pg_port: std::num::NonZeroU16::new(5432).unwrap(),
-            pgtest_pg_user: String::from("postgres"),
-            pgtest_pg_host: String::from("localhost"),
-            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::new(5).unwrap(),
-            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::new(2).unwrap(),
+            pgtest_pg_database: Default::default(),
+            pgtest_pg_port: PostgresUpstreamPort::default(),
+            pgtest_pg_user: Default::default(),
+            pgtest_pg_host: "localhost".parse().unwrap(),
+            pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::new(5).unwrap().into(),
+            pgtest_pg_cleanup_pool_connection: std::num::NonZeroUsize::new(2).unwrap().into(),
         }
     }
 }
@@ -196,7 +197,7 @@ impl Default for PostgresConfig {
 impl<'a> From<&'a Container<Postgres>> for PostgresConfig {
     fn from(value: &'a Container<Postgres>) -> Self {
         Self {
-            pgtest_pg_host: value.get_host().unwrap().to_string(),
+            pgtest_pg_host: value.get_host().unwrap().to_string().parse().unwrap(),
             pgtest_pg_port: value
                 .get_host_port_ipv4(ContainerPort::Tcp(5432))
                 .unwrap()
@@ -218,11 +219,11 @@ pub async fn pg_container_config() -> PostgresConfig {
         tokio::task::spawn_blocking(|| PostgresConfig::from(&*POSTGRES_CONTAINER)).await.unwrap();
     let id = NEXT_TEMPLATE_ID.fetch_add(1, Ordering::Relaxed);
 
-    config.pgtest_pg_database = format!("pgt{id:016x}");
+    config.pgtest_pg_database = format!("pgt{id:016x}").parse().unwrap();
     let (client, connection) = Config::new()
-        .host(&config.pgtest_pg_host)
-        .port(config.pgtest_pg_port.get())
-        .user(&config.pgtest_pg_user)
+        .host(config.pgtest_pg_host.as_str())
+        .port(config.pgtest_pg_port.port())
+        .user(config.pgtest_pg_user.as_str())
         .password("postgres")
         .dbname("postgres")
         .connect(NoTls)
