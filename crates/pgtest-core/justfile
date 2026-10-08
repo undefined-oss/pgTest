@@ -28,22 +28,21 @@ check-profile:
 build:
     cargo build -p {{crate}} --all-targets
 
-# Run all tests in this crate (requires Docker)
+# Run shared logic and Tokio driver tests (no Docker)
 test:
-    cargo nextest run --locked -p {{crate}} --no-fail-fast
-    cargo test --locked -p {{crate}} --doc --no-fail-fast
+    cargo test --locked -p {{crate}} --features runtime-tests
 
-# Run engine simulations and worker unit tests without Docker
+# Verify deterministic simulation without Tokio in the dependency graph
 test-unit:
-    cargo nextest run --locked -p {{crate}} --lib --no-fail-fast -E 'not test(worker_manager::worker_engine_manager_test::) or test(=worker_manager::worker_engine_manager_test::startup_future_fits_stack_budget)'
+    cargo test --locked -p {{crate}} --no-default-features --features test-support
 
-# Run PostgreSQL-backed manager tests (requires Docker)
+# Test real task scheduling, timers, and cancellation with a controlled backend
+test-runtime:
+    cargo test --locked -p {{crate}} --features runtime-tests worker_manager::tests
+
+# PostgreSQL-backed runtime and wire tests live at the composition boundary
 test-integration:
-    cargo nextest run --locked -p {{crate}} --lib --no-fail-fast -E 'test(worker_manager::worker_engine_manager_test::) and not test(=worker_manager::worker_engine_manager_test::startup_future_fits_stack_budget)'
-
-test-debug:
-    RUST_LOG=debug cargo nextest run --locked -p {{crate}} --no-fail-fast --success-output immediate --failure-output immediate-final
-    RUST_LOG=debug cargo test --locked -p {{crate}} --doc --no-fail-fast -- --show-output
+    cargo test --locked -p pgtest-wire
 
 # Build and open the docs of this crate
 doc:

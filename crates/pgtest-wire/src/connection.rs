@@ -6,7 +6,7 @@ use pgtest::{
         core::LeaseId,
         errors::{AttachError, InvalidLeaseId},
     },
-    worker_manager::WorkerEngineManager,
+    worker_manager::ManagerHandle,
 };
 use pgwire::{
     api::auth::protocol_negotiation,
@@ -57,7 +57,7 @@ impl ClientStream {
 }
 
 #[hotpath::measure]
-pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<WorkerEngineManager>) {
+pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<ManagerHandle>) {
     let Ok(Some((mut framed, startup))) =
         tokio::time::timeout(Duration::from_secs(60), stream.startup()).await
     else {
@@ -134,14 +134,12 @@ pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<WorkerE
             return;
         }
         result = postgres_upstream::connect(
-            &lease_session.database_name,
+            &lease_session.target,
             params,
-            &manager.pg_client.host,
-            *manager.pg_client.port,
         ) => match result {
             Ok(session) => session,
             Err(error) => {
-                tracing::warn!(%error, host = %manager.pg_client.host, port = *manager.pg_client.port, "upstream connection failed");
+                tracing::warn!(%error, "upstream connection failed");
                 reject_connection(&mut framed, "08006", "unable to connect to PostgreSQL").await;
                 return;
             }

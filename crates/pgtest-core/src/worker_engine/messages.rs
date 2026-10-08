@@ -1,45 +1,40 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Duration};
 
-use pgtest_utils::read_string::ReadString;
-use tokio_util::sync::CancellationToken;
+use pgtest_engine_backend::PgTarget;
 
-use crate::worker_engine::{
+use super::{
     core::LeaseId,
-    database_jobs::DatabaseWorkerMessages,
+    database_jobs::{DatabaseId, DatabaseWorkerMessages},
     errors::{AttachError, ReleaseError},
-    traits::ConsumerIO,
 };
 
-#[cfg_attr(test, derive(Debug))]
-pub enum EngineMessage<C: ConsumerIO> {
-    AttachOrJoin {
-        lease: LeaseId,
-        reply: C,
-        message_time: Instant,
-    },
-    ReleaseLease {
-        lease: LeaseId,
-        reply: C,
-    },
-    Detach {
-        lease: LeaseId,
-        generation: u64,
-    },
-    LeaseMaxTimeReached {
-        lease: LeaseId,
-        generation: u64,
-    },
-    DatabaseWorker(DatabaseWorkerMessages),
-    #[cfg(test)]
-    Barrier {
-        reply: tokio::sync::oneshot::Sender<()>,
-    },
-    Shutdown,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Tick(pub Duration);
+impl Tick {
+    pub fn elapsed_since(self, earlier: Self) -> Duration {
+        self.0.saturating_sub(earlier.0)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RequestId(pub u64);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LeaseKey {
+    pub lease: LeaseId,
+    pub generation: u64,
 }
 
-#[cfg_attr(test, derive(Clone, Debug))]
+#[derive(Clone, Debug)]
+pub enum EngineMessage {
+    AttachOrJoin { template: String, lease: LeaseId, reply: RequestId, message_time: Tick },
+    ReleaseLease { lease: LeaseId, reply: RequestId },
+    Detach { lease: LeaseId, generation: u64 },
+    LeaseMaxTimeReached { lease: LeaseId, generation: u64 },
+    DatabaseWorker(DatabaseWorkerMessages),
+    Shutdown,
+}
+#[derive(Clone, Debug)]
 pub enum ConsumerReply {
-    Attached { database_name: ReadString, generation: u64, cancellation: CancellationToken },
+    Attached { database_id: DatabaseId, target: Arc<PgTarget>, key: LeaseKey },
     FailedToAttach,
     AttachRejected(AttachError),
     ReleaseResult(Result<(), ReleaseError>),

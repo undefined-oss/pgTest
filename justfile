@@ -49,7 +49,8 @@ clean:
 
 # Run workspace tests, including deterministic simulations (requires Docker)
 test:
-    cargo nextest run --locked --workspace --no-fail-fast
+    cargo test --locked -p pgtest-core --no-default-features --features test-support
+    cargo nextest run --locked --workspace --features pgtest-core/runtime-tests --no-fail-fast
     cargo test --locked --workspace --doc --no-fail-fast
 
 mod core "crates/pgtest-core"

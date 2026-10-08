@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pgtest-core", "crates/pgtest-wire", "crates/pgtest-utils", "crates/pgtest-database-operations", "apps/cli", "apps/server"]
+members = ["crates/pgtest-core", "crates/pgtest-wire", "crates/pgtest-utils", "crates/pgtest-database-operations", "apps/cli", "apps/server", "crates/pgtest-engine-backend"]
 
 [workspace.package]
 version = "0.1.0"

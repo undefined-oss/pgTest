@@ -1,17 +1,17 @@
 use std::collections::VecDeque;
 
-use pgtest_utils::read_string::ReadString;
+use pgtest_engine_backend::{ProvisionedDatabase, ResourceId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::worker_engine::{
     database_jobs::{CleanupDatabase, CreateDatabases, DatabaseId},
-    errors::PostgresDDLClientError,
+    errors::BackendError,
 };
 
 #[derive(Clone, Debug)]
 pub struct Database {
     pub database_id: DatabaseId,
-    pub database_name: ReadString,
+    pub resource: ProvisionedDatabase,
 }
 
 #[cfg(test)]
@@ -48,16 +48,23 @@ mod tests {
     }
 }
 
-#[derive(Default)]
-#[cfg_attr(test, derive(Clone, Debug))]
+#[derive(Default, Clone, Debug)]
 pub struct DatabaseInventory {
     next_database_id: u64,
     creating: FxHashSet<DatabaseId>,
     ready: VecDeque<Database>,
-    retiring: FxHashMap<DatabaseId, ReadString>,
+    retiring: FxHashMap<DatabaseId, ResourceId>,
 }
 
 impl DatabaseInventory {
+    pub fn retire_resource(&mut self, resource_id: ResourceId) -> CleanupDatabase {
+        let request = self.reserve_creations(1).expect("one identity");
+        let database_id = request.first_database_id;
+        self.creating.remove(&database_id);
+        self.retiring.insert(database_id, resource_id.clone());
+        CleanupDatabase { database_id, resource_id }
+    }
+
     pub fn reserve_creations(&mut self, amount: usize) -> Option<CreateDatabases> {
         let amount = std::num::NonZeroUsize::new(amount)?;
         let last = self
@@ -82,13 +89,13 @@ impl DatabaseInventory {
     pub fn complete_creation(
         &mut self,
         database_id: DatabaseId,
-        result: Result<ReadString, PostgresDDLClientError>,
-    ) -> Option<Result<(), PostgresDDLClientError>> {
+        result: Result<ProvisionedDatabase, BackendError>,
+    ) -> Option<Result<(), BackendError>> {
         if !self.creating.remove(&database_id) {
             return None;
         }
-        Some(result.map(|database_name| {
-            self.ready.push_back(Database { database_id, database_name });
+        Some(result.map(|resource| {
+            self.ready.push_back(Database { database_id, resource });
         }))
     }
 
@@ -107,9 +114,9 @@ impl DatabaseInventory {
     /// failure cannot lose the database's identity.
     pub fn retire(&mut self, database: Database) -> CleanupDatabase {
         debug_assert!(!self.contains(database.database_id));
-        let Database { database_id, database_name } = database;
-        self.retiring.insert(database_id, database_name.clone());
-        CleanupDatabase { database_id, database_name }
+        let Database { database_id, resource } = database;
+        self.retiring.insert(database_id, resource.resource_id.clone());
+        CleanupDatabase { database_id, resource_id: resource.resource_id }
     }
 
     /// Forget a retired database only after successful cleanup. Unknown or
@@ -117,8 +124,8 @@ impl DatabaseInventory {
     pub fn complete_cleanup(
         &mut self,
         database_id: DatabaseId,
-        result: Result<(), PostgresDDLClientError>,
-    ) -> Option<Result<(), PostgresDDLClientError>> {
+        result: Result<(), BackendError>,
+    ) -> Option<Result<(), BackendError>> {
         if !self.retiring.contains_key(&database_id) {
             return None;
         }
@@ -135,7 +142,7 @@ impl DatabaseInventory {
         &self.ready
     }
 
-    pub fn retiring(&self) -> &FxHashMap<DatabaseId, ReadString> {
+    pub fn retiring(&self) -> &FxHashMap<DatabaseId, ResourceId> {
         &self.retiring
     }
 

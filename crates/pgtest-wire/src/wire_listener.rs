@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use pgtest::worker_manager::WorkerEngineManager;
+use pgtest::worker_manager::ManagerHandle;
 use thiserror::Error;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -58,7 +58,7 @@ impl Drop for TcpWireListener {
 
 #[hotpath::measure]
 pub async fn run(
-    manager: Arc<WorkerEngineManager>,
+    manager: Arc<ManagerHandle>,
     address: SocketAddr,
 ) -> Result<SocketAddr, WireError> {
     Ok(run_with_handle(manager, address).await?.detach())
@@ -66,7 +66,7 @@ pub async fn run(
 
 #[hotpath::measure]
 pub async fn run_with_handle(
-    manager: Arc<WorkerEngineManager>,
+    manager: Arc<ManagerHandle>,
     address: SocketAddr,
 ) -> Result<TcpWireListener, WireError> {
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -105,7 +105,7 @@ pub async fn run_with_handle(
 #[cfg(unix)]
 #[hotpath::measure]
 pub async fn run_unix(
-    manager: Arc<WorkerEngineManager>,
+    manager: Arc<ManagerHandle>,
     directory: &std::path::Path,
 ) -> Result<UnixWireListener, WireError> {
     run_unix_on_port(manager, directory, DEFAULT_WIRE_PORT).await
@@ -115,7 +115,7 @@ pub async fn run_unix(
 #[cfg(unix)]
 #[hotpath::measure]
 pub async fn run_unix_on_port(
-    manager: Arc<WorkerEngineManager>,
+    manager: Arc<ManagerHandle>,
     directory: &std::path::Path,
     port: u16,
 ) -> Result<UnixWireListener, WireError> {
@@ -148,23 +148,38 @@ pub async fn run_unix_on_port(
 mod listener_test {
     use std::sync::Arc;
 
-    use pgtest::{worker_engine::core::WorkerEngineConfig, worker_manager::WorkerEngineManager};
+    use pgtest::worker_engine::core::WorkerEngineConfig;
     use pgtest_database_operations::testcontainer::pg_container_config;
     use tracing_test::traced_test;
 
     use crate::wire_listener;
 
+    async fn start_runtime(
+        config: pgtest_database_operations::manager::config::PostgresConfig,
+        engine: WorkerEngineConfig,
+    ) -> Result<pgtest::worker_manager::TokioRuntime, Box<dyn std::error::Error>> {
+        let prepared =
+            pgtest_database_operations::backend::PreparedPostgres::prepare(config).await?;
+        Ok(pgtest::worker_manager::TokioRuntime::start(
+            prepared.backend,
+            pgtest::worker_manager::RuntimeConfig {
+                template: prepared.template,
+                engine,
+                creation_concurrency: prepared.creation_concurrency,
+                cleanup_concurrency: prepared.cleanup_concurrency,
+                stale_resources: prepared.stale_resources,
+            },
+        )
+        .await?)
+    }
+
     #[tokio::test]
     async fn owned_tcp_shutdown_closes_sessions_and_releases_manager() {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            let engine = Arc::new(
-                WorkerEngineManager::start(
-                    pg_container_config().await,
-                    WorkerEngineConfig::default(),
-                )
+            let runtime = start_runtime(pg_container_config().await, WorkerEngineConfig::default())
                 .await
-                .unwrap(),
-            );
+                .unwrap();
+            let engine = Arc::new(runtime.handle());
             let listener =
                 wire_listener::run_with_handle(engine.clone(), ([127, 0, 0, 1], 0).into())
                     .await
@@ -184,7 +199,8 @@ mod listener_test {
             let _ = task.await.unwrap();
             assert!(client.is_closed());
             assert!(tokio::net::TcpStream::connect(address).await.is_err());
-            Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("manager retained")).shutdown().await;
+            drop(engine);
+            runtime.shutdown().await.unwrap();
         })
         .await
         .unwrap();
@@ -193,14 +209,10 @@ mod listener_test {
     #[tokio::test]
     async fn dropping_owned_tcp_listener_aborts_its_task() {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            let engine = Arc::new(
-                WorkerEngineManager::start(
-                    pg_container_config().await,
-                    WorkerEngineConfig::default(),
-                )
+            let runtime = start_runtime(pg_container_config().await, WorkerEngineConfig::default())
                 .await
-                .unwrap(),
-            );
+                .unwrap();
+            let engine = Arc::new(runtime.handle());
             let listener =
                 wire_listener::run_with_handle(engine.clone(), ([127, 0, 0, 1], 0).into())
                     .await
@@ -211,7 +223,8 @@ mod listener_test {
                 tokio::task::yield_now().await;
             }
             assert!(tokio::net::TcpStream::connect(address).await.is_err());
-            Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("manager retained")).shutdown().await;
+            drop(engine);
+            runtime.shutdown().await.unwrap();
         })
         .await
         .unwrap();
@@ -276,9 +289,8 @@ mod listener_test {
             pg_config.pgtest_pg_host = upstream_directory.to_str().unwrap().parse().unwrap();
         }
         let template = pg_config.pgtest_pg_database.clone();
-        let engine = Arc::new(
-            WorkerEngineManager::start(pg_config, WorkerEngineConfig::default()).await.unwrap(),
-        );
+        let runtime = start_runtime(pg_config, WorkerEngineConfig::default()).await.unwrap();
+        let engine = Arc::new(runtime.handle());
         let port = if use_unix_upstream { 7432 } else { 6432 };
         let listener = if use_unix_upstream {
             wire_listener::run_unix_on_port(engine.clone(), &directory.0, port).await.unwrap()
@@ -313,10 +325,8 @@ mod listener_test {
 
         listener.shutdown().await;
         assert!(!socket_path.exists());
-        Arc::try_unwrap(engine)
-            .unwrap_or_else(|_| panic!("listener retained the manager"))
-            .shutdown()
-            .await;
+        drop(engine);
+        runtime.shutdown().await.unwrap();
         bridge_tasks.shutdown().await;
     }
 
@@ -327,11 +337,9 @@ mod listener_test {
         let template_database = pg_config.pgtest_pg_database.clone();
         let worker_engine_config = WorkerEngineConfig::default();
 
-        let engine = Arc::new(
-            WorkerEngineManager::start(pg_config, worker_engine_config)
-                .await
-                .expect("Manager started up"),
-        );
+        let runtime =
+            start_runtime(pg_config, worker_engine_config).await.expect("Manager started up");
+        let engine = Arc::new(runtime.handle());
 
         let address = wire_listener::run(engine.clone(), ([0, 0, 0, 0], 0).into()).await.unwrap();
         assert!(address.ip().is_unspecified());

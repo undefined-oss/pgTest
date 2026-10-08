@@ -1,8 +1,6 @@
 use std::num::NonZeroUsize;
 
-use pgtest_utils::read_string::ReadString;
-
-use crate::worker_engine::errors::PostgresDDLClientError;
+use pgtest_engine_backend::{BackendError, ProvisionedDatabase, ResourceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DatabaseId(pub u64);
@@ -25,14 +23,14 @@ impl CreateDatabases {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CleanupDatabase {
     pub database_id: DatabaseId,
-    pub database_name: ReadString,
+    pub resource_id: ResourceId,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DatabaseWorkerMessages {
-    CreationFinished { database_id: DatabaseId, result: Result<ReadString, PostgresDDLClientError> },
-    CleanupFinished { database_id: DatabaseId, result: Result<(), PostgresDDLClientError> },
+    CreationFinished { database_id: DatabaseId, result: Result<ProvisionedDatabase, BackendError> },
+    CleanupFinished { database_id: DatabaseId, result: Result<(), BackendError> },
 }

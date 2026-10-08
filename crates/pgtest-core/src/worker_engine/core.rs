@@ -1,19 +1,16 @@
-use std::{
-    collections::VecDeque, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Instant,
-};
+use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use derive_more::{Deref, Display, From, FromStr, Into};
 use envconfig::Envconfig;
-use pgtest_utils::read_string::ReadString;
-use rustc_hash::FxHashMap;
-use tokio_util::sync::CancellationToken;
+use pgtest_engine_backend::{BackendError, ResourceId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::worker_engine::{
+use super::{
     database_inventory::{Database, DatabaseInventory},
-    database_jobs::DatabaseWorkerMessages,
-    errors::{AttachError, PostgresDDLClientError, ReleaseError},
-    messages::{ConsumerReply, EngineMessage},
-    traits::{ConsumerIO, EngineIO, EngineInbox, PostgresClient},
+    database_jobs::{DatabaseId, DatabaseWorkerMessages},
+    errors::{AttachError, ReleaseError},
+    messages::{ConsumerReply, EngineMessage, LeaseKey, RequestId, Tick},
+    traits::EngineIO,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deref, Display, From, FromStr, Into)]
@@ -67,39 +64,34 @@ enum LeaseStatus {
     Closed,
 }
 
-#[cfg_attr(test, derive(Clone, Debug))]
-pub(crate) struct LeaseEntry {
-    pub(crate) database: Database,
-    pub(crate) conns: u16,
-    pub(crate) generation: u64,
-    pub(crate) cancellation: CancellationToken,
+#[derive(Clone, Debug)]
+pub struct LeaseEntry {
+    pub database: Database,
+    pub conns: u16,
+    pub generation: u64,
 }
 
-pub(crate) struct WorkerEngine<Consumer, IO, Inbox, Postgres>
-where
-    Consumer: ConsumerIO,
-    IO: EngineIO<Consumer>,
-    Inbox: EngineInbox<Consumer>,
-    Postgres: PostgresClient,
-{
+pub struct WorkerEngine<IO: EngineIO> {
     pub(crate) leases: FxHashMap<LeaseId, LeaseEntry>,
-    // Identity records survive physical cleanup. Slots and connection counts do not.
     lease_records: FxHashMap<LeaseId, LeaseStatus>,
     next_generation: u64,
     config: WorkerEngineConfig,
-    pg_client: Arc<Postgres>,
+    template: String,
     pub(crate) waiters: VecDeque<LeaseId>,
-    group_waiters: FxHashMap<LeaseId, Vec<(Consumer, Instant)>>,
-    pub(crate) counters: EngineCounters,
+    group_waiters: FxHashMap<LeaseId, Vec<(RequestId, Tick)>>,
+    pub counters: EngineCounters,
     engine_io: IO,
-    inbox: Inbox,
-    consumer: PhantomData<Consumer>,
-    root_cancellation_token: CancellationToken,
+    now: Tick,
     pub inventory: DatabaseInventory,
+    initial_cleanup: FxHashSet<DatabaseId>,
+    initial_creation: FxHashSet<DatabaseId>,
+    startup: Option<Result<(), BackendError>>,
+    first_error: Option<BackendError>,
+    stopped: bool,
+    initialized: bool,
 }
 
-#[derive(Default)]
-#[cfg_attr(test, derive(Clone, Debug))]
+#[derive(Default, Clone, Debug)]
 pub struct EngineCounters {
     pub rejected_attach_max_lifetime: u64,
     pub waiter_timeouts: u64,
@@ -109,117 +101,154 @@ pub struct EngineCounters {
     pub unable_to_start_database_slots: u64,
 }
 
-impl<Consumer, IO, Inbox, Postgres> WorkerEngine<Consumer, IO, Inbox, Postgres>
-where
-    Consumer: ConsumerIO,
-    IO: EngineIO<Consumer>,
-    Inbox: EngineInbox<Consumer>,
-    Postgres: PostgresClient,
-{
-    pub fn new(
-        pool_worker_config: WorkerEngineConfig,
-        postgres_manager: Arc<Postgres>,
-        engine_io: IO,
-        inbox: Inbox,
-    ) -> WorkerEngine<Consumer, IO, Inbox, Postgres> {
-        let leases = FxHashMap::default();
-        let root_cancellation_token = CancellationToken::new();
-
-        WorkerEngine::<Consumer, IO, Inbox, Postgres> {
-            leases,
+impl<IO: EngineIO> WorkerEngine<IO> {
+    pub fn new(config: WorkerEngineConfig, template: String, engine_io: IO) -> Self {
+        Self {
+            leases: FxHashMap::default(),
             lease_records: FxHashMap::default(),
             next_generation: 0,
-            config: pool_worker_config.clone(),
-            pg_client: postgres_manager,
+            config,
+            template,
             waiters: VecDeque::new(),
             group_waiters: FxHashMap::default(),
             counters: EngineCounters::default(),
             engine_io,
-            inbox,
-            consumer: PhantomData,
-            root_cancellation_token,
+            now: Tick::default(),
             inventory: DatabaseInventory::default(),
+            initial_cleanup: FxHashSet::default(),
+            initial_creation: FxHashSet::default(),
+            startup: None,
+            first_error: None,
+            stopped: false,
+            initialized: false,
         }
     }
 
-    #[hotpath::measure]
-    pub async fn try_init(&mut self) -> Result<(), PostgresDDLClientError> {
+    /// Initialization uses exactly the same worker messages as replenishment.
+    pub fn initialize(&mut self, stale: Vec<ResourceId>) {
+        assert!(!self.initialized, "manager may only initialize once");
+        self.initialized = true;
+        for resource_id in stale {
+            let request = self.inventory.retire_resource(resource_id);
+            self.initial_cleanup.insert(request.database_id);
+            let id = request.database_id;
+            if self.engine_io.request_cleanup(request).is_err() {
+                self.initial_cleanup.remove(&id);
+            }
+        }
+        if self.initial_cleanup.is_empty() {
+            self.create_initial();
+        }
+    }
+
+    fn create_initial(&mut self) {
         let Some(request) =
             self.inventory.reserve_creations(usize::from(*self.config.initial_slots))
         else {
-            return Ok(());
+            self.startup = Some(Ok(()));
+            return;
         };
-        let mut first_error = None;
-        let inventory = &mut self.inventory;
-        self.pg_client
-            .create_databases(request.amount.get(), |index, result| {
-                let database_id = request.database_id(index);
-                if let Ok(database_name) = &result {
-                    tracing::info!(?database_id, %database_name, "created initial database");
-                }
-                if let Err(error) = inventory
-                    .complete_creation(database_id, result)
-                    .expect("initial creation must have a pending reservation")
-                {
-                    tracing::error!(?database_id, %error, "initial database creation failed");
-                    first_error.get_or_insert(error);
-                }
-            })
-            .await;
-        first_error.map_or(Ok(()), Err)
+        for index in 0..request.amount.get() {
+            self.initial_creation.insert(request.database_id(index));
+        }
+        if self.engine_io.request_creation(request).is_err() {
+            for id in self.initial_creation.drain() {
+                self.inventory.cancel_creation(id);
+            }
+            self.startup =
+                Some(Err(BackendError::OperationFailed("creation worker unavailable".into())));
+        }
     }
 
-    #[hotpath::measure]
-    pub async fn run(&mut self) {
-        self.process_messages().await;
-        self.root_cancellation_token.cancel();
+    #[cfg(feature = "tokio-runtime")]
+    pub(crate) fn io_mut(&mut self) -> &mut IO {
+        &mut self.engine_io
     }
 
-    pub(super) async fn process_messages(&mut self) {
-        while let Some(msg) = self.inbox.wait_for_message().await {
-            match msg {
-                EngineMessage::AttachOrJoin { lease, reply, message_time } => {
+    pub fn startup_result(&self) -> Option<&Result<(), BackendError>> {
+        self.startup.as_ref()
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    pub fn leases(&self) -> &FxHashMap<LeaseId, LeaseEntry> {
+        &self.leases
+    }
+
+    pub fn waiters(&self) -> &VecDeque<LeaseId> {
+        &self.waiters
+    }
+
+    pub fn shutdown(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        for (lease, entry) in &self.leases {
+            self.engine_io
+                .cancel_sessions(&LeaseKey { lease: lease.clone(), generation: entry.generation });
+        }
+        for (_, replies) in self.group_waiters.drain() {
+            for (reply, _) in replies {
+                let _ = self
+                    .engine_io
+                    .reply(reply, ConsumerReply::AttachRejected(AttachError::EngineUnavailable));
+            }
+        }
+        self.waiters.clear();
+    }
+
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
+    pub fn handle(&mut self, msg: EngineMessage, now: Tick) {
+        if self.stopped {
+            return;
+        }
+        self.now = now;
+        match msg {
+            EngineMessage::AttachOrJoin { template, lease, reply, message_time } => {
+                if template != self.template {
+                    let _ = self
+                        .engine_io
+                        .reply(reply, ConsumerReply::AttachRejected(AttachError::TemplateMismatch));
+                } else {
                     self.attach_or_join(lease, reply, message_time);
                 }
-                EngineMessage::ReleaseLease { lease, reply } => {
-                    let result = self.release_lease(&lease);
-                    // Closure and cleanup belong to the engine even if this
-                    // reply is lost.
-                    let _ = reply.reply(ConsumerReply::ReleaseResult(result));
+            }
+            EngineMessage::ReleaseLease { lease, reply } => {
+                let result = self.release_lease(&lease);
+                // Closure and cleanup belong to the engine even if this
+                // reply is lost.
+                let _ = self.engine_io.reply(reply, ConsumerReply::ReleaseResult(result));
+            }
+            EngineMessage::Detach { lease, generation } => match self.leases.get_mut(&lease) {
+                Some(leased_worker) if leased_worker.generation == generation => {
+                    leased_worker.conns = if leased_worker.conns == 0 {
+                        self.counters.detach_on_zero += 1;
+                        leased_worker.conns
+                    } else {
+                        leased_worker.conns - 1
+                    };
                 }
-                EngineMessage::Detach { lease, generation } => match self.leases.get_mut(&lease) {
-                    Some(leased_worker) if leased_worker.generation == generation => {
-                        leased_worker.conns = if leased_worker.conns == 0 {
-                            self.counters.detach_on_zero += 1;
-                            leased_worker.conns
-                        } else {
-                            leased_worker.conns - 1
-                        };
-                    }
-                    _ => {}
-                },
-                EngineMessage::LeaseMaxTimeReached { lease, generation } => {
-                    if self.leases.get(&lease).is_some_and(|entry| entry.generation == generation) {
-                        self.counters.rejected_attach_max_lifetime += 1;
-                        self.retire_lease(&lease);
-                    }
+                _ => {}
+            },
+            EngineMessage::LeaseMaxTimeReached { lease, generation } => {
+                if self.leases.get(&lease).is_some_and(|entry| entry.generation == generation) {
+                    self.counters.rejected_attach_max_lifetime += 1;
+                    self.retire_lease(&lease);
                 }
-                EngineMessage::DatabaseWorker(message) => {
-                    self.handle_database_worker_message(message);
-                }
-                #[cfg(test)]
-                EngineMessage::Barrier { reply } => {
-                    let _ = reply.send(());
-                }
-                EngineMessage::Shutdown => {
-                    self.root_cancellation_token.cancel();
-                    break;
-                }
+            }
+            EngineMessage::DatabaseWorker(message) => {
+                self.handle_database_worker_message(message);
+            }
+            EngineMessage::Shutdown => {
+                self.shutdown();
             }
         }
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn handle_database_worker_message(&mut self, message: DatabaseWorkerMessages) {
         match message {
             DatabaseWorkerMessages::CreationFinished { database_id, result } => {
@@ -228,6 +257,15 @@ where
                     return;
                 };
 
+                if self.initial_creation.remove(&database_id) {
+                    if let Err(error) = result {
+                        self.first_error.get_or_insert(error);
+                    }
+                    if self.initial_creation.is_empty() {
+                        self.startup = Some(self.first_error.take().map_or(Ok(()), Err));
+                    }
+                    return;
+                }
                 if let Err(error) = result {
                     self.counters.template_create_failures += 1;
                     tracing::error!(?database_id, %error, "database creation failed");
@@ -244,6 +282,9 @@ where
 
                 if let Err(error) = result {
                     tracing::error!(?database_id, %error, "database cleanup failed; retaining retirement record");
+                }
+                if self.initial_cleanup.remove(&database_id) && self.initial_cleanup.is_empty() {
+                    self.create_initial();
                 }
             }
         }
@@ -269,7 +310,9 @@ where
 
         if let Some(waiters) = self.group_waiters.remove(lease) {
             for (reply, _) in waiters {
-                let _ = reply.reply(ConsumerReply::AttachRejected(AttachError::LeaseClosed));
+                let _ = self
+                    .engine_io
+                    .reply(reply, ConsumerReply::AttachRejected(AttachError::LeaseClosed));
             }
         }
 
@@ -279,10 +322,18 @@ where
         Ok(())
     }
 
-    fn attach_or_join(&mut self, lease: LeaseId, reply: Consumer, message_time: Instant) {
+    fn attach_or_join(&mut self, lease: LeaseId, reply: RequestId, message_time: Tick) {
+        if !matches!(self.startup, Some(Ok(()))) {
+            let _ = self
+                .engine_io
+                .reply(reply, ConsumerReply::AttachRejected(AttachError::EngineUnavailable));
+            return;
+        }
         match self.admit_lease(&lease) {
             Ok(LeaseStatus::Closed) => {
-                let _ = reply.reply(ConsumerReply::AttachRejected(AttachError::LeaseClosed));
+                let _ = self
+                    .engine_io
+                    .reply(reply, ConsumerReply::AttachRejected(AttachError::LeaseClosed));
                 return;
             }
             Err(error) => {
@@ -290,15 +341,15 @@ where
                     ReleaseError::InvalidLeaseId => AttachError::InvalidLeaseId,
                     _ => AttachError::LeaseRecordLimitReached,
                 };
-                let _ = reply.reply(ConsumerReply::AttachRejected(error));
+                let _ = self.engine_io.reply(reply, ConsumerReply::AttachRejected(error));
                 return;
             }
             Ok(LeaseStatus::Open) => {}
         }
 
         if let Some(entry) = self.leases.get(&lease) {
-            let database_name = entry.database.database_name.clone();
-            self.reply_attached(&lease, database_name, reply);
+            let database = entry.database.clone();
+            self.reply_attached(&lease, database, reply);
             return;
         }
 
@@ -312,8 +363,8 @@ where
             return;
         };
 
-        let database_name = self.assign_database(&lease, database);
-        self.reply_attached(&lease, database_name, reply);
+        let database = self.assign_database(&lease, database);
+        self.reply_attached(&lease, database, reply);
 
         if self.restore_unclaimed_database(&lease) {
             self.dispatch_waiters();
@@ -321,7 +372,7 @@ where
         self.grow();
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn dispatch_waiters(&mut self) {
         while !self.inventory.ready().is_empty() {
             let Some(lease) = self.waiters.pop_front() else {
@@ -334,7 +385,9 @@ where
 
             if self.lease_records.get(&lease) == Some(&LeaseStatus::Closed) {
                 for (reply, _) in replies {
-                    let _ = reply.reply(ConsumerReply::AttachRejected(AttachError::LeaseClosed));
+                    let _ = self
+                        .engine_io
+                        .reply(reply, ConsumerReply::AttachRejected(AttachError::LeaseClosed));
                 }
                 continue;
             }
@@ -343,15 +396,15 @@ where
 
             for (reply, message_time) in replies {
                 if self.config.lease_claim_timeout_ms > 0
-                    && message_time.elapsed().as_millis()
+                    && self.now.elapsed_since(message_time).as_millis()
                         > u128::from(self.config.lease_claim_timeout_ms)
                 {
                     self.counters.waiter_timeouts += 1;
                     continue;
                 }
 
-                let database_name = match self.leases.get(&lease) {
-                    Some(entry) => entry.database.database_name.clone(),
+                let database = match self.leases.get(&lease) {
+                    Some(entry) => entry.database.clone(),
                     None => {
                         let database = self
                             .inventory
@@ -362,7 +415,7 @@ where
                     }
                 };
 
-                self.reply_attached(&lease, database_name, reply);
+                self.reply_attached(&lease, database, reply);
             }
 
             if !already_assigned {
@@ -371,19 +424,23 @@ where
         }
     }
 
-    fn reply_attached(&mut self, lease: &LeaseId, database_name: ReadString, reply: Consumer) {
+    fn reply_attached(&mut self, lease: &LeaseId, database: Database, reply: RequestId) {
         let entry = self.leases.get_mut(lease).expect("reply requires an assigned lease");
         let Some(conns) = entry.conns.checked_add(1) else {
-            let _ = reply.reply(ConsumerReply::FailedToAttach);
+            let _ = self.engine_io.reply(reply, ConsumerReply::FailedToAttach);
             return;
         };
         entry.conns = conns;
-        if reply
-            .reply(ConsumerReply::Attached {
-                database_name,
-                generation: entry.generation,
-                cancellation: entry.cancellation.clone(),
-            })
+        if self
+            .engine_io
+            .reply(
+                reply,
+                ConsumerReply::Attached {
+                    database_id: database.database_id,
+                    target: std::sync::Arc::new(database.resource.target),
+                    key: LeaseKey { lease: lease.clone(), generation: entry.generation },
+                },
+            )
             .is_err()
         {
             entry.conns -= 1;
@@ -391,48 +448,37 @@ where
     }
 
     fn restore_unclaimed_database(&mut self, lease: &LeaseId) -> bool {
-        if !self.leases.get(lease).is_some_and(|entry| entry.conns == 0) {
+        if self.leases.get(lease).is_none_or(|entry| entry.conns != 0) {
             return false;
         }
         let entry = self.leases.remove(lease).unwrap();
-        entry.cancellation.cancel();
+        self.engine_io
+            .cancel_sessions(&LeaseKey { lease: lease.clone(), generation: entry.generation });
         self.inventory.return_ready(entry.database);
 
         true
     }
 
-    #[hotpath::measure]
-    fn assign_database(&mut self, lease: &LeaseId, database: Database) -> ReadString {
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
+    fn assign_database(&mut self, lease: &LeaseId, database: Database) -> Database {
         debug_assert!(!self.leases.contains_key(lease));
 
-        let database_name = database.database_name.clone();
+        let assigned = database.clone();
 
         self.next_generation =
             self.next_generation.checked_add(1).expect("lease generation exhausted");
 
         let generation = self.next_generation;
-        let cancellation = self.root_cancellation_token.child_token();
-
-        self.leases.insert(
-            lease.clone(),
-            LeaseEntry { database, conns: 0, generation, cancellation: cancellation.clone() },
-        );
-
+        self.leases.insert(lease.clone(), LeaseEntry { database, conns: 0, generation });
         if self.config.lease_claim_timeout_ms > 0 {
-            if self
-                .engine_io
-                .send_delayed_message(
-                    EngineMessage::LeaseMaxTimeReached { lease: lease.clone(), generation },
-                    self.config.lease_claim_timeout_ms as u32,
-                    cancellation,
-                )
-                .is_err()
-            {
-                tracing::error!(%lease, "unable to schedule lease expiration")
-            }
+            self.engine_io.schedule(
+                LeaseKey { lease: lease.clone(), generation },
+                Tick(self.now.0 + Duration::from_millis(self.config.lease_claim_timeout_ms)),
+                EngineMessage::LeaseMaxTimeReached { lease: lease.clone(), generation },
+            );
         }
 
-        database_name
+        assigned
     }
 
     pub(crate) fn grow(&mut self) {
@@ -448,7 +494,7 @@ where
                 !self.leases.contains_key(*lease)
                     && replies.iter().any(|(_, queued_at)| {
                         self.config.lease_claim_timeout_ms == 0
-                            || queued_at.elapsed().as_millis()
+                            || self.now.elapsed_since(*queued_at).as_millis()
                                 <= u128::from(self.config.lease_claim_timeout_ms)
                     })
             })
@@ -476,13 +522,14 @@ where
         }
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn retire_lease(&mut self, lease: &LeaseId) {
         let Some(entry) = self.leases.remove(lease) else {
             return;
         };
 
-        entry.cancellation.cancel();
+        self.engine_io
+            .cancel_sessions(&LeaseKey { lease: lease.clone(), generation: entry.generation });
 
         let request = self.inventory.retire(entry.database);
         let database_id = request.database_id;
@@ -494,8 +541,7 @@ where
         self.grow();
     }
 
-    #[cfg(test)]
-    pub fn snapshot<'a>(&'a self) -> &'a Self {
+    pub fn snapshot(&self) -> &Self {
         self
     }
 }

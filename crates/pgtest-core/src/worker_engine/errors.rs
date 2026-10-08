@@ -48,16 +48,4 @@ pub enum ConsumerIOError {
     FailedToReplyTheConsumer,
 }
 
-#[derive(Error, Debug)]
-pub enum PostgresDDLClientError {
-    #[error("{0}")]
-    OperationFailed(String),
-}
-
-impl From<pgtest_database_operations::manager::errors::PostgresOperationsError>
-    for PostgresDDLClientError
-{
-    fn from(error: pgtest_database_operations::manager::errors::PostgresOperationsError) -> Self {
-        Self::OperationFailed(error.to_string())
-    }
-}
+pub use pgtest_engine_backend::BackendError;

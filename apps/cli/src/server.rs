@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
-use pgtest::worker_manager::WorkerEngineManager;
+use anyhow::{Context, Result};
+use pgtest::worker_manager::{RuntimeConfig, TokioRuntime};
 use pgtest_pg_wire::wire_listener;
 
 use crate::args::ServeOptions;
@@ -12,7 +12,24 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let startup = WorkerEngineManager::start(options.postgres_config(), options.engine_config());
+    let startup = async {
+        let prepared = pgtest_database_operations::backend::PreparedPostgres::prepare(
+            options.postgres_config(),
+        )
+        .await?;
+        let runtime = TokioRuntime::start(
+            prepared.backend,
+            RuntimeConfig {
+                template: prepared.template,
+                engine: options.engine_config(),
+                creation_concurrency: prepared.creation_concurrency,
+                cleanup_concurrency: prepared.cleanup_concurrency,
+                stale_resources: prepared.stale_resources,
+            },
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(runtime)
+    };
     #[cfg(unix)]
     let engine = tokio::select! {
         result = startup => result.context("failed to start database engine")?,
@@ -21,7 +38,8 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     };
     #[cfg(not(unix))]
     let engine = startup.await.context("failed to start database engine")?;
-    let engine = Arc::new(engine);
+    let runtime = engine;
+    let engine = Arc::new(runtime.handle());
     let mut tcp_listener = None;
     #[cfg(unix)]
     let mut unix_listener = None;
@@ -50,9 +68,13 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
         tokio::select! {
             _ = interrupt.recv() => {},
             _ = terminate.recv() => {},
+            _ = engine.stopped() => {},
         }
         #[cfg(not(unix))]
-        tokio::signal::ctrl_c().await.context("failed to wait for Ctrl-C")?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("failed to wait for Ctrl-C")?,
+            _ = engine.stopped() => {},
+        }
         Ok(())
     }
     .await;
@@ -65,8 +87,6 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     if let Some(listener) = unix_listener {
         listener.shutdown().await;
     }
-    let engine = Arc::try_unwrap(engine)
-        .map_err(|_| anyhow!("listeners retained the database engine after shutdown"))?;
-    engine.shutdown().await;
+    runtime.shutdown().await?;
     result
 }

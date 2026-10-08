@@ -10,6 +10,7 @@ publish = false
 workspace = true
 
 [dependencies]
+pgtest-engine-backend = { path = "../pgtest-engine-backend" }
 derive_more = { workspace = true, features = ["full"] }
 hotpath = { workspace = true }
 tokio-postgres = "0.7.18"

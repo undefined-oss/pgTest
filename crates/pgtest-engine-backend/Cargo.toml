@@ -1,0 +1,12 @@
+[package]
+name = "pgtest-engine-backend"
+edition = "2024"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

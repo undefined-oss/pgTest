@@ -226,7 +226,7 @@ impl PostgresManager {
         Ok(())
     }
 
-    pub async fn drop_ddl_templates_like(&self) -> Result<(), PostgresOperationsError> {
+    pub async fn discover_stale_databases(&self) -> Result<Vec<String>, PostgresOperationsError> {
         let client = self
             .acquire_drop_connection()
             .await
@@ -246,6 +246,15 @@ impl PostgresManager {
             .collect::<Result<_, _>>()
             .map_err(|error| PostgresOperationsError::UnableToListDatabases(error.into()))?;
 
+        Ok(names)
+    }
+
+    pub async fn drop_ddl_templates_like(&self) -> Result<(), PostgresOperationsError> {
+        let names = self.discover_stale_databases().await?;
+        let client = self
+            .acquire_drop_connection()
+            .await
+            .map_err(PostgresOperationsError::UnableToListDatabases)?;
         for batch in names.chunks(CLEANUP_PIPELINE_DEPTH) {
             let results =
                 join_all(batch.iter().map(|name| Self::drop_on_connection(&client, name))).await;
