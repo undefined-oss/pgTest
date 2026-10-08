@@ -5,7 +5,7 @@ use bpaf::{Bpaf, Parser, ShellComp};
 use pgtest::worker_engine::core::{
     GrowBatchSize, InitialSlots, StarvationThreshold, WorkerEngineConfig,
 };
-use pgtest_database_operations::manager::config::{
+use pgtest_database_operations::config::{
     CleanupPoolSize, CreationPoolSize, PostgresConfig, PostgresDatabase, PostgresHost,
     PostgresUpstreamPort, PostgresUser,
 };

@@ -24,13 +24,13 @@ pgtest-engine-backend = { path = "../pgtest-engine-backend" }
 hotpath = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { version = "0.7.19", features = ["rt"], optional = true }
-futures-util = { version = "0.3.34", optional = true }
+pgtest-database-operations = { path = "../pgtest-database-operations", optional = true }
 
 [features]
 default = ["tokio-runtime"]
-tokio-runtime = ["dep:tokio", "dep:tokio-util", "dep:futures-util", "dep:hotpath"]
+tokio-runtime = ["dep:pgtest-database-operations", "dep:tokio", "dep:tokio-util", "dep:hotpath"]
 test-support = []
-runtime-tests = ["tokio-runtime", "test-support", "tokio/test-util"]
-hotpath = ["tokio-runtime", "hotpath/hotpath"]
+runtime-tests = ["tokio-runtime", "test-support", "tokio/test-util", "pgtest-database-operations/test-support"]
+hotpath = ["tokio-runtime", "hotpath/hotpath", "pgtest-database-operations/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 hotpath-prometheus = ["hotpath", "hotpath/hotpath-prometheus"]

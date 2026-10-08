@@ -57,14 +57,6 @@ pub struct DatabaseInventory {
 }
 
 impl DatabaseInventory {
-    pub fn retire_resource(&mut self, resource_id: ResourceId) -> CleanupDatabase {
-        let request = self.reserve_creations(1).expect("one identity");
-        let database_id = request.first_database_id;
-        self.creating.remove(&database_id);
-        self.retiring.insert(database_id, resource_id.clone());
-        CleanupDatabase { database_id, resource_id }
-    }
-
     pub fn reserve_creations(&mut self, amount: usize) -> Option<CreateDatabases> {
         let amount = std::num::NonZeroUsize::new(amount)?;
         let last = self

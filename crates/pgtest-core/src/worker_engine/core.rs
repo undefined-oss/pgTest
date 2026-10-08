@@ -2,7 +2,7 @@ use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use derive_more::{Deref, Display, From, FromStr, Into};
 use envconfig::Envconfig;
-use pgtest_engine_backend::{BackendError, ResourceId};
+use pgtest_engine_backend::BackendError;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
@@ -83,7 +83,6 @@ pub struct WorkerEngine<IO: EngineIO> {
     engine_io: IO,
     now: Tick,
     pub inventory: DatabaseInventory,
-    initial_cleanup: FxHashSet<DatabaseId>,
     initial_creation: FxHashSet<DatabaseId>,
     startup: Option<Result<(), BackendError>>,
     first_error: Option<BackendError>,
@@ -115,7 +114,6 @@ impl<IO: EngineIO> WorkerEngine<IO> {
             engine_io,
             now: Tick::default(),
             inventory: DatabaseInventory::default(),
-            initial_cleanup: FxHashSet::default(),
             initial_creation: FxHashSet::default(),
             startup: None,
             first_error: None,
@@ -125,20 +123,10 @@ impl<IO: EngineIO> WorkerEngine<IO> {
     }
 
     /// Initialization uses exactly the same worker messages as replenishment.
-    pub fn initialize(&mut self, stale: Vec<ResourceId>) {
+    pub fn initialize(&mut self) {
         assert!(!self.initialized, "manager may only initialize once");
         self.initialized = true;
-        for resource_id in stale {
-            let request = self.inventory.retire_resource(resource_id);
-            self.initial_cleanup.insert(request.database_id);
-            let id = request.database_id;
-            if self.engine_io.request_cleanup(request).is_err() {
-                self.initial_cleanup.remove(&id);
-            }
-        }
-        if self.initial_cleanup.is_empty() {
-            self.create_initial();
-        }
+        self.create_initial();
     }
 
     fn create_initial(&mut self) {
@@ -282,9 +270,6 @@ impl<IO: EngineIO> WorkerEngine<IO> {
 
                 if let Err(error) = result {
                     tracing::error!(?database_id, %error, "database cleanup failed; retaining retirement record");
-                }
-                if self.initial_cleanup.remove(&database_id) && self.initial_cleanup.is_empty() {
-                    self.create_initial();
                 }
             }
         }

@@ -1,16 +1,16 @@
 # pgtest-core
 
-Database lifecycle management is implemented by three actors. The Manager owns
-leases and inventory, Creation processes requested counts, and Cleanup deletes
-specified resources. Their state transitions are synchronous and shared by two
-runtimes. Mailboxes are unbounded; active provider operations are limited by the
-configured creation and cleanup concurrency.
+The Manager actor owns leases and inventory in this crate. Creation and Cleanup
+actors live in `pgtest-database-operations`; their synchronous state transitions
+live in `pgtest-engine-backend` and are shared by the deterministic simulator and
+Tokio workers. Mailboxes are unbounded; active provider operations are limited by
+the configured creation and cleanup concurrency.
 
-`pgtest-engine-backend` defines resource identities, PostgreSQL connection targets,
-and `AsyncDatabaseBackend`. Core has no dependency on the PostgreSQL implementation.
-The CLI and server compose `PreparedPostgres` from `pgtest-database-operations` with
-`TokioRuntime`. The wire receives a `ManagerHandle` and connects using each returned
-`LeaseSession.target`.
+`pgtest-engine-backend` defines resource identities, connection targets, worker
+messages, and synchronous scheduling states. It has no Tokio dependency.
+The `tokio-runtime` feature enables PostgreSQL operations and concrete worker
+handles. The CLI and server call `TokioRuntime::start(postgres_config, engine_config)`;
+the wire receives a `ManagerHandle` and uses each returned `LeaseSession.target`.
 
 ## Deterministic runtime
 
@@ -44,39 +44,54 @@ Tests explicitly complete active creations and deletions, discard requests or
 sessions, inject stale messages, fail submissions, close actor mailboxes, and
 inspect inventory. Quiescence does not imply startup or pending operations have
 completed. The same shared worker transitions enforce execution windows in both
-runtimes. Cancellation and restart scenarios can supply discovered stale resources
-without assuming that interrupted remote operations rolled back.
+runtimes. PostgreSQL bootstrap and stale-database discovery are tested in
+`pgtest-database-operations`, outside the Manager state machine.
 
 ## Tokio runtime
 
-The default `tokio-runtime` feature enables production tasks and handles.
-`TokioRuntime::start(Arc<B>, RuntimeConfig)` accepts any `AsyncDatabaseBackend`.
-`runtime.handle()` returns a cloneable handle; `runtime.shutdown().await` cancels
-and joins the actors and reports task failures. Dropping the runtime also signals
-cancellation. Keep the runtime owner alive for the lifetime of the listeners.
+`TokioRuntime::start(PostgresConfig, WorkerEngineConfig)` bootstraps PostgreSQL,
+initializes Creation and Cleanup through their concrete handle constructors,
+and spawns Manager. Each actor has its own unbounded inbox. Worker results,
+wire requests, session detaches, and timer messages go directly to Manager's
+inbox. There is no additional completion channel or forwarding task.
 
-Worker handles use unbounded Tokio channels; request replies use oneshots. Actor
-logic has no Tokio types. Runtime ports translate logical session cancellation
-into cancellation tokens and logical deadlines into monotonic Tokio timers.
-Creation processes batches sequentially with concurrent operations inside each
-batch; Cleanup uses a separate execution window. Provider calls are attempted
-once, with each result reported separately. Failed cleanup retains retirement
+Manager stores concrete `CreationHandle` and `CleanupHandle` values. The three
+actors are independently spawned with `tokio::spawn`; `TaskTracker` is used only
+for explicit shutdown. There is no supervisor, task-error aggregation, or automatic
+sibling cancellation when a worker exits.
+
+`runtime.handle()` returns a cloneable handle. Keep the runtime alive while
+listeners serve connections. `runtime.shutdown().await` cancels the shared token
+and waits for actors and timers; it returns `()`. Dropping the runtime signals
+cancellation. `ManagerHandle::stopped()` waits for its own inbox to close.
+
+Creation processes batches in order with concurrent operations inside each
+batch; Cleanup uses its own execution window. Each operation is attempted once,
+and each result is reported separately. Failed cleanup retains retirement
 identity and never returns a resource to available supply.
 
 ```sh
 cargo test -p pgtest-core --features runtime-tests
 ```
 
-These tests use a controlled async backend to exercise actual tasks, cancellation,
-timers, worker failure, and reply ownership. PostgreSQL integration tests live in
-`pgtest-wire` and `pgtest-database-operations` and require Docker.
+These tests cover all three actors with controlled clients, including reply
+ownership, concurrency, timers, cancellation, and simulator parity. Helpers for
+injecting clients are compiled only for tests or the explicit `test-support`
+feature. PostgreSQL integration tests in `pgtest-wire` and
+`pgtest-database-operations` require Docker.
 
 ## Lifecycle guarantees
 
-Startup delegates discovered stale-resource deletion and initial creation to the
-workers. Cleanup failures warn and permit startup to continue. Initial creation
-waits for every result; a partial failure fails startup and leaves successful
-resources for the next startup reconciliation.
+Bootstrap validates PostgreSQL and removes stale databases on one temporary
+connection, closes it, and returns configuration and metadata. Bootstrap cleanup
+failures warn and permit startup to continue; validation failures stop startup.
+Each handle initializes its independent pool before spawning its actor. A
+constructor failure cancels and waits for any worker already started. Dropping
+a pending startup future signals cancellation through the runtime owner.
+
+Manager requests initial creation through Creation's inbox and waits for every
+result. A partial creation failure fails startup and leaves successful resources
+for the next bootstrap.
 
 Connections sharing an open lease share its database. Last-session detach keeps
 the assignment. Explicit release closes the identifier, cancels its sessions, and
@@ -85,8 +100,8 @@ behavior of permitting a fresh assignment. The claim-timeout setting still also
 controls lease lifetime; zero disables both deadlines.
 
 Shutdown discards queued work and drops active operation futures. Already submitted
-provider commands may still finish remotely. Actor failure stops the runtime;
-callers receive unavailability instead of waiting indefinitely.
+provider commands may still finish remotely. Closed mailboxes return submission
+errors; worker panics are not monitored or propagated by a supervisor.
 
 The previous `WorkerEngineManager::start(PostgresConfig, ...)` interface and public
 `pg_client` field have been replaced by explicit application composition,

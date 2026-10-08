@@ -36,7 +36,7 @@ test:
 test-unit:
     cargo test --locked -p {{crate}} --no-default-features --features test-support
 
-# Test real task scheduling, timers, and cancellation with a controlled backend
+# Test Manager transport, reply ownership, and cancellation
 test-runtime:
     cargo test --locked -p {{crate}} --features runtime-tests worker_manager::tests
 

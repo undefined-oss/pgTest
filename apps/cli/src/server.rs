@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use pgtest::worker_manager::{RuntimeConfig, TokioRuntime};
+use pgtest::worker_manager::TokioRuntime;
 use pgtest_pg_wire::wire_listener;
 
 use crate::args::ServeOptions;
@@ -12,24 +12,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let startup = async {
-        let prepared = pgtest_database_operations::backend::PreparedPostgres::prepare(
-            options.postgres_config(),
-        )
-        .await?;
-        let runtime = TokioRuntime::start(
-            prepared.backend,
-            RuntimeConfig {
-                template: prepared.template,
-                engine: options.engine_config(),
-                creation_concurrency: prepared.creation_concurrency,
-                cleanup_concurrency: prepared.cleanup_concurrency,
-                stale_resources: prepared.stale_resources,
-            },
-        )
-        .await?;
-        Ok::<_, anyhow::Error>(runtime)
-    };
+    let startup = TokioRuntime::start(options.postgres_config(), options.engine_config());
     #[cfg(unix)]
     let engine = tokio::select! {
         result = startup => result.context("failed to start database engine")?,
@@ -87,6 +70,6 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     if let Some(listener) = unix_listener {
         listener.shutdown().await;
     }
-    runtime.shutdown().await?;
+    runtime.shutdown().await;
     result
 }

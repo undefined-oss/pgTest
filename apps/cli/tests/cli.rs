@@ -84,9 +84,7 @@ async fn version_reports_compiled_metadata_and_ignores_runtime_overrides() {
 
 #[cfg(unix)]
 mod unix {
-    use pgtest_database_operations::{
-        manager::config::PostgresConfig, testcontainer::pg_container_config,
-    };
+    use pgtest_database_operations::{config::PostgresConfig, testcontainer::pg_container_config};
     use tokio::{process::Child, task::JoinHandle};
     use tokio_postgres::{Client, Config, NoTls};
 

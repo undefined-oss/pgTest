@@ -376,7 +376,6 @@ fn creation_window_refills_and_maps_out_of_order_results() {
         "template".into(),
         NonZeroUsize::new(2).unwrap(),
         NonZeroUsize::MIN,
-        vec![],
     );
     pump(&mut r);
     assert_eq!(r.active_creations(), vec![DatabaseId(1), DatabaseId(2)]);
@@ -398,24 +397,7 @@ fn startup_partial_failure_waits_for_every_result() {
     assert!(matches!(r.snapshot().startup_result(), Some(Err(_))));
     assert_eq!(r.snapshot().inventory.ready().len(), 1);
 }
-#[test]
-fn stale_cleanup_precedes_creation_and_failure_does_not_block_startup() {
-    let mut r = SimRuntime::with_options(
-        config(1, 0, 0),
-        "template".into(),
-        NonZeroUsize::MIN,
-        NonZeroUsize::MIN,
-        vec![ResourceId("old".into())],
-    );
-    pump(&mut r);
-    assert!(r.active_creations().is_empty());
-    let id = r.active_cleanups()[0].database_id;
-    r.complete_cleanup(id, Err(failure()));
-    pump(&mut r);
-    finish_creations(&mut r);
-    assert!(matches!(r.snapshot().startup_result(), Some(Ok(()))));
-    assert_eq!(r.snapshot().inventory.retiring().len(), 1);
-}
+
 #[test]
 fn shutdown_discards_work_cancels_sessions_and_pending_replies() {
     let mut r = ready(config(1, 0, 0));
@@ -547,7 +529,6 @@ fn cleanup_execution_window_allows_out_of_order_progress() {
         "template".into(),
         NonZeroUsize::new(3).unwrap(),
         NonZeroUsize::new(2).unwrap(),
-        vec![],
     );
     finish_creations(&mut r);
     for lease in ["a", "b", "c"] {
@@ -561,26 +542,4 @@ fn cleanup_execution_window_allows_out_of_order_progress() {
     pump(&mut r);
     assert_eq!(r.active_cleanups().len(), 2);
     assert!(r.active_cleanups().iter().any(|r| r.database_id == jobs[0].database_id));
-}
-#[test]
-fn restart_can_reconcile_remote_success_after_local_cancellation() {
-    let mut first = SimRuntime::new(config(1, 0, 0));
-    pump(&mut first);
-    let id = first.active_creations()[0];
-    let remote = db(id);
-    first.shutdown();
-    let mut second = SimRuntime::with_options(
-        config(0, 0, 0),
-        "template".into(),
-        NonZeroUsize::MIN,
-        NonZeroUsize::MIN,
-        vec![remote.resource_id.clone()],
-    );
-    pump(&mut second);
-    let cleanup = second.active_cleanups()[0].clone();
-    assert_eq!(cleanup.resource_id, remote.resource_id);
-    second.complete_cleanup(cleanup.database_id, Ok(()));
-    pump(&mut second);
-    assert!(matches!(second.snapshot().startup_result(), Some(Ok(()))));
-    assert!(second.snapshot().inventory.retiring().is_empty());
 }

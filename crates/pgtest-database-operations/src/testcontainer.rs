@@ -17,9 +17,9 @@ use testcontainers::{
 };
 use tokio_postgres::{Config, NoTls};
 
-use crate::manager::config::PostgresUpstreamPort;
+use crate::config::PostgresUpstreamPort;
 #[cfg(any(test, feature = "test-support"))]
-use crate::manager::{config::PostgresConfig, database_name::PostgresDatabaseName};
+use crate::{config::PostgresConfig, database_name::PostgresDatabaseName};
 
 const NAME: &str = "postgres";
 const TAG: &str = "18-alpine";
@@ -245,4 +245,43 @@ pub async fn pg_container_config() -> PostgresConfig {
         .expect("join the template connection driver")
         .expect("close the template creation connection");
     config
+}
+
+#[cfg(test)]
+pub(crate) struct TestClients {
+    pub(crate) creation: crate::creation_worker_handle::CreationClient,
+    pub(crate) cleanup: crate::cleanup_worker_handle::CleanupClient,
+}
+
+#[cfg(test)]
+impl TestClients {
+    pub(crate) async fn start(
+        config: PostgresConfig,
+    ) -> Result<Self, crate::backend::BootstrapError> {
+        let metadata = crate::backend::bootstrap(&config).await?;
+        Ok(Self {
+            creation: crate::creation_worker_handle::CreationClient::connect(&config, metadata)
+                .await?,
+            cleanup: crate::cleanup_worker_handle::CleanupClient::connect(&config).await?,
+        })
+    }
+
+    pub(crate) async fn drop_ddl_templates_like(
+        &self,
+    ) -> Result<(), crate::errors::PostgresOperationsError> {
+        let client = self
+            .cleanup
+            .acquire_drop_connection()
+            .await
+            .map_err(crate::errors::PostgresOperationsError::UnableToListDatabases)?;
+        let names = crate::connection::discover_stale(
+            &client,
+            self.creation.template_database_name.template_name(),
+        )
+        .await?;
+        for name in names {
+            crate::cleanup_worker_handle::CleanupClient::drop_on_connection(&client, &name).await?;
+        }
+        Ok(())
+    }
 }

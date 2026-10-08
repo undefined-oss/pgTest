@@ -1848,8 +1848,8 @@ version = "0.1.0"
 dependencies = [
  "derive_more",
  "envconfig",
- "futures-util",
  "hotpath",
+ "pgtest-database-operations",
  "pgtest-engine-backend",
  "pgtest-utils",
  "rustc-hash",
@@ -1871,7 +1871,6 @@ dependencies = [
  "pgtest-engine-backend",
  "pgtest-utils",
  "rand 0.10.2",
- "rustc-hash",
  "serde_json",
  "tempfile",
  "testcontainers",

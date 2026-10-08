@@ -1,7 +1,6 @@
 //! Tokio driver for the shared lifecycle actors.
 use std::{
     collections::HashMap,
-    num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -9,11 +8,15 @@ use std::{
     time::Duration,
 };
 
-use pgtest_engine_backend::{AsyncDatabaseBackend, BackendError, PgTarget, ResourceId};
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::{JoinHandle, JoinSet},
+use pgtest_database_operations::{
+    backend::{BootstrapError, PreparedPostgres},
+    cleanup_worker_handle::CleanupHandle,
+    config::PostgresConfig,
+    creation_worker_handle::CreationHandle,
+    errors::PostgresClientError,
 };
+use pgtest_engine_backend::{BackendError, PgTarget, jobs::DatabaseWorkerMessages};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::worker_engine::{
@@ -23,29 +26,20 @@ use crate::worker_engine::{
     messages::{ConsumerReply, EngineMessage, LeaseKey, RequestId, Tick},
     traits::EngineIO,
 };
-mod database_workers;
 #[cfg(all(test, feature = "runtime-tests"))]
 mod tests;
 
-#[derive(Clone, Debug)]
-pub struct RuntimeConfig {
-    pub template: String,
-    pub engine: WorkerEngineConfig,
-    pub creation_concurrency: NonZeroUsize,
-    pub cleanup_concurrency: NonZeroUsize,
-    pub stale_resources: Vec<ResourceId>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    #[error(transparent)]
+    Bootstrap(#[from] BootstrapError),
+    #[error(transparent)]
+    Postgres(#[from] PostgresClientError),
     #[error("initial database creation failed: {0}")]
     InitialDatabaseCreation(#[from] BackendError),
     #[error("actor runtime stopped during startup")]
     RuntimeStopped,
 }
-#[derive(Debug, thiserror::Error)]
-#[error("actor runtime failed: {0}")]
-pub struct RuntimeError(pub String);
 
 enum Reply {
     Attached(LeaseSession),
@@ -54,6 +48,12 @@ enum Reply {
 struct Envelope {
     message: EngineMessage,
     reply: Option<(RequestId, oneshot::Sender<Reply>)>,
+}
+
+impl From<DatabaseWorkerMessages> for Envelope {
+    fn from(message: DatabaseWorkerMessages) -> Self {
+        Self { message: EngineMessage::DatabaseWorker(message), reply: None }
+    }
 }
 
 #[derive(Clone)]
@@ -149,7 +149,7 @@ impl ManagerHandle {
     }
 
     pub async fn stopped(&self) {
-        self.shutdown.cancelled().await;
+        self.commands.closed().await;
     }
 }
 
@@ -182,100 +182,101 @@ impl Drop for LeaseSession {
     }
 }
 
-/// Runtime owns tasks; handles only submit requests. Dropping it cancels tasks.
+/// Owns explicit shutdown for three independent actors.
 pub struct TokioRuntime {
     manager: ManagerHandle,
     shutdown: CancellationToken,
-    supervisor: Option<JoinHandle<Result<(), RuntimeError>>>,
+    tracker: TaskTracker,
 }
 impl TokioRuntime {
-    pub async fn start<B: AsyncDatabaseBackend>(
-        backend: Arc<B>,
-        config: RuntimeConfig,
+    pub async fn start(
+        postgres_config: PostgresConfig,
+        engine_config: WorkerEngineConfig,
     ) -> Result<Self, StartError> {
+        let prepared = PreparedPostgres::prepare(postgres_config).await?;
+        let template = prepared.metadata.template.clone();
+        let (runtime, inbox) = Self::new(&engine_config);
+        let creation = CreationHandle::new(
+            &prepared.config,
+            prepared.metadata,
+            runtime.manager.commands.clone(),
+            runtime.tracker.clone(),
+            runtime.shutdown.clone(),
+        )
+        .await;
+        let creation = match creation {
+            Ok(handle) => handle,
+            Err(error) => {
+                runtime.shutdown().await;
+                return Err(error.into());
+            }
+        };
+        let cleanup = CleanupHandle::new(
+            &prepared.config,
+            runtime.manager.commands.clone(),
+            runtime.tracker.clone(),
+            runtime.shutdown.clone(),
+        )
+        .await;
+        let cleanup = match cleanup {
+            Ok(handle) => handle,
+            Err(error) => {
+                runtime.shutdown().await;
+                return Err(error.into());
+            }
+        };
+        runtime.start_manager(creation, cleanup, template, engine_config, inbox).await
+    }
+
+    fn new(config: &WorkerEngineConfig) -> (Self, mpsc::UnboundedReceiver<Envelope>) {
         let shutdown = CancellationToken::new();
-        let epoch = tokio::time::Instant::now();
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let (create_tx, create_rx) = mpsc::unbounded_channel();
-        let (cleanup_tx, cleanup_rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let tracker = TaskTracker::new();
+        let (commands, inbox) = mpsc::unbounded_channel();
         let manager = ManagerHandle {
-            commands: commands_tx.clone(),
+            commands,
             next_request: Arc::new(AtomicU64::new(1)),
-            epoch,
-            claim_timeout: Duration::from_millis(config.engine.lease_claim_timeout_ms),
+            epoch: tokio::time::Instant::now(),
+            claim_timeout: Duration::from_millis(config.lease_claim_timeout_ms),
             shutdown: shutdown.clone(),
         };
+        (Self { manager, shutdown, tracker: TaskTracker::new() }, inbox)
+    }
+
+    async fn start_manager(
+        self,
+        creation: CreationHandle,
+        cleanup: CleanupHandle,
+        template: String,
+        config: WorkerEngineConfig,
+        inbox: mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<Self, StartError> {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let epoch = self.manager.epoch;
         let ports = TokioPorts {
-            creation: create_tx,
-            cleanup: cleanup_tx,
+            creation,
+            cleanup,
             replies: HashMap::new(),
             cancellations: HashMap::new(),
-            commands: commands_tx.downgrade(),
-            events: events_tx.clone(),
+            commands: self.manager.commands.downgrade(),
             epoch,
-            shutdown: shutdown.clone(),
-            tracker: tracker.clone(),
+            shutdown: self.shutdown.clone(),
+            tracker: self.tracker.clone(),
         };
-        drop(commands_tx);
-        let engine = WorkerEngine::new(config.engine, config.template, ports);
-        let mut actors = JoinSet::new();
-        actors.spawn(run_manager(
+        let engine = WorkerEngine::new(config, template, ports);
+        tokio::spawn(self.tracker.track_future(run_manager(
             engine,
-            commands_rx,
-            events_rx,
-            config.stale_resources,
+            inbox,
             ready_tx,
             epoch,
-            shutdown.clone(),
-        ));
-        actors.spawn(database_workers::run_creation(
-            backend.clone(),
-            config.creation_concurrency,
-            create_rx,
-            events_tx.clone(),
-            shutdown.clone(),
-        ));
-        actors.spawn(database_workers::run_cleanup(
-            backend,
-            config.cleanup_concurrency,
-            cleanup_rx,
-            events_tx,
-            shutdown.clone(),
-        ));
-        let cancellation = shutdown.clone();
-        let supervisor = tokio::spawn(async move {
-            let mut failure = None;
-            while let Some(result) = actors.join_next().await {
-                match result {
-                    Err(error) => {
-                        failure.get_or_insert(RuntimeError(error.to_string()));
-                    }
-                    Ok(Err(error)) => {
-                        failure.get_or_insert(error);
-                    }
-                    Ok(Ok(())) if !cancellation.is_cancelled() => {
-                        failure.get_or_insert(RuntimeError("actor exited unexpectedly".into()));
-                    }
-                    Ok(Ok(())) => {}
-                }
-                cancellation.cancel();
-            }
-            tracker.close();
-            tracker.wait().await;
-            failure.map_or(Ok(()), Err)
-        });
-        let runtime = Self { manager, shutdown, supervisor: Some(supervisor) };
+            self.shutdown.clone(),
+        )));
         match ready_rx.await {
-            Ok(Ok(())) if !runtime.shutdown.is_cancelled() => Ok(runtime),
+            Ok(Ok(())) => Ok(self),
             Ok(Err(error)) => {
-                let _ = runtime.shutdown().await;
+                self.shutdown().await;
                 Err(StartError::InitialDatabaseCreation(error))
             }
-            _ => {
-                let _ = runtime.shutdown().await;
+            Err(_) => {
+                self.shutdown().await;
                 Err(StartError::RuntimeStopped)
             }
         }
@@ -286,13 +287,10 @@ impl TokioRuntime {
     }
 
     #[hotpath::measure]
-    pub async fn shutdown(mut self) -> Result<(), RuntimeError> {
+    pub async fn shutdown(self) {
         self.shutdown.cancel();
-        self.supervisor
-            .take()
-            .expect("runtime owns supervisor")
-            .await
-            .map_err(|e| RuntimeError(e.to_string()))?
+        self.tracker.close();
+        self.tracker.wait().await;
     }
 }
 impl Drop for TokioRuntime {
@@ -302,23 +300,22 @@ impl Drop for TokioRuntime {
 }
 
 struct TokioPorts {
-    creation: mpsc::UnboundedSender<CreateDatabases>,
-    cleanup: mpsc::UnboundedSender<CleanupDatabase>,
+    creation: CreationHandle,
+    cleanup: CleanupHandle,
     replies: HashMap<RequestId, oneshot::Sender<Reply>>,
     cancellations: HashMap<LeaseKey, CancellationToken>,
     commands: mpsc::WeakUnboundedSender<Envelope>,
-    events: mpsc::UnboundedSender<EngineMessage>,
     epoch: tokio::time::Instant,
     shutdown: CancellationToken,
     tracker: TaskTracker,
 }
 impl EngineIO for TokioPorts {
     fn request_creation(&mut self, request: CreateDatabases) -> Result<(), IOError> {
-        self.creation.send(request).map_err(|_| IOError::FailedToSendTheMessage)
+        self.creation.create(request).map_err(|_| IOError::FailedToSendTheMessage)
     }
 
     fn request_cleanup(&mut self, request: CleanupDatabase) -> Result<(), IOError> {
-        self.cleanup.send(request).map_err(|_| IOError::FailedToSendTheMessage)
+        self.cleanup.delete(request).map_err(|_| IOError::FailedToSendTheMessage)
     }
 
     fn reply(&mut self, id: RequestId, reply: ConsumerReply) -> Result<(), ConsumerReply> {
@@ -354,12 +351,16 @@ impl EngineIO for TokioPorts {
     fn schedule(&mut self, key: LeaseKey, deadline: Tick, message: EngineMessage) {
         let cancel =
             self.cancellations.entry(key).or_insert_with(|| self.shutdown.child_token()).clone();
-        let events = self.events.clone();
+        let commands = self.commands.clone();
         let until = self.epoch + deadline.0;
         self.tracker.spawn(async move {
             tokio::select! { biased;
                 _ = cancel.cancelled() => {},
-                _ = tokio::time::sleep_until(until) => { let _ = events.send(message); }
+                _ = tokio::time::sleep_until(until) => {
+                    if let Some(sender) = commands.upgrade() {
+                        let _ = sender.send(Envelope { message, reply: None });
+                    }
+                }
             }
         });
     }
@@ -374,13 +375,11 @@ impl EngineIO for TokioPorts {
 async fn run_manager(
     mut engine: WorkerEngine<TokioPorts>,
     mut commands: mpsc::UnboundedReceiver<Envelope>,
-    mut events: mpsc::UnboundedReceiver<EngineMessage>,
-    stale: Vec<ResourceId>,
     ready: oneshot::Sender<Result<(), BackendError>>,
     epoch: tokio::time::Instant,
     shutdown: CancellationToken,
-) -> Result<(), RuntimeError> {
-    engine.initialize(stale);
+) {
+    engine.initialize();
     let mut ready = Some(ready);
     loop {
         if let Some(result) = engine.startup_result()
@@ -391,13 +390,11 @@ async fn run_manager(
         let message = tokio::select! {
             _ = shutdown.cancelled() => break,
             command = commands.recv() => {
-                let Some(envelope) = command else { shutdown.cancel(); break; };
+                let Some(envelope) = command else { break; };
                 if let Some((id, sender)) = envelope.reply { engine.io_mut().replies.insert(id, sender); }
                 envelope.message
             },
-            event = events.recv() => {
-                let Some(message) = event else { break; }; message
-            }
+
         };
         engine.handle(message, Tick(epoch.elapsed()));
         // Release dead response senders even if no database supply arrives.
@@ -407,5 +404,4 @@ async fn run_manager(
         }
     }
     engine.shutdown();
-    Ok(())
 }

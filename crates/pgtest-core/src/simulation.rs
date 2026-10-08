@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use pgtest_engine_backend::{BackendError, ProvisionedDatabase, ResourceId};
+use pgtest_engine_backend::{BackendError, ProvisionedDatabase};
 
 use crate::worker_engine::{
     core::{LeaseId, WorkerEngine, WorkerEngineConfig},
@@ -131,7 +131,6 @@ impl SimRuntime {
             "template".into(),
             NonZeroUsize::new(10).unwrap(),
             NonZeroUsize::new(5).unwrap(),
-            vec![],
         )
     }
 
@@ -140,11 +139,10 @@ impl SimRuntime {
         template: String,
         creation_limit: NonZeroUsize,
         cleanup_limit: NonZeroUsize,
-        stale: Vec<ResourceId>,
     ) -> Self {
         let shared = Rc::new(RefCell::new(Shared::default()));
         let mut manager = WorkerEngine::new(config, template, SimPorts(shared.clone()));
-        manager.initialize(stale);
+        manager.initialize();
         Self {
             manager,
             shared,

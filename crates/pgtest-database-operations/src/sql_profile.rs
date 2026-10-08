@@ -4,16 +4,16 @@
 //! Keep its required target and fields here; no database driver adapter is
 //! needed in the applications.
 
-pub(super) const LIST_DATABASES: &str = "SELECT datname FROM pg_database WHERE datname LIKE $1";
-pub(super) const SERVER_VERSION: &str = "SELECT current_setting('server_version_num')::int8";
-pub(super) const CREATE_DATABASE: &str = "CREATE DATABASE \"<database>\" TEMPLATE \"<template>\"";
-pub(super) const CREATE_DATABASE_FILE_COPY: &str =
+pub(crate) const LIST_DATABASES: &str = "SELECT datname FROM pg_database WHERE datname LIKE $1";
+pub(crate) const SERVER_VERSION: &str = "SELECT current_setting('server_version_num')::int8";
+pub(crate) const CREATE_DATABASE: &str = "CREATE DATABASE \"<database>\" TEMPLATE \"<template>\"";
+pub(crate) const CREATE_DATABASE_FILE_COPY: &str =
     "CREATE DATABASE \"<database>\" TEMPLATE \"<template>\" STRATEGY=FILE_COPY";
-pub(super) const DROP_DATABASE: &str = "DROP DATABASE IF EXISTS \"<database>\" WITH (FORCE)";
+pub(crate) const DROP_DATABASE: &str = "DROP DATABASE IF EXISTS \"<database>\" WITH (FORCE)";
 
 /// Measure only the driver future, excluding pool acquisition.
 /// Labels omit generated identifiers so repeated DDL shares one SQL bucket.
-pub(super) fn query<T>(
+pub(crate) fn query<T>(
     statement: &str,
     query: impl Future<Output = Result<T, tokio_postgres::Error>>,
 ) -> impl Future<Output = Result<T, tokio_postgres::Error>> {

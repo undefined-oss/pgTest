@@ -1,4 +1,4 @@
-//! Provider-neutral database lifecycle contract. No executor dependency.
+//! Provider-neutral database lifecycle contract and synchronous worker states.
 use std::{future::Future, path::PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -30,12 +30,22 @@ pub enum BackendError {
 
 /// Each call makes one attempt. Success means the database is ready to connect.
 /// Dropping a future does not guarantee cancellation of remote side effects.
-pub trait AsyncDatabaseBackend: Send + Sync + 'static {
+pub trait DatabaseCreator: Send + Sync + 'static {
     fn create_database(
         &self,
     ) -> impl Future<Output = Result<ProvisionedDatabase, BackendError>> + Send;
+}
+
+pub trait DatabaseCleaner: Send + Sync + 'static {
     fn delete_database(
         &self,
         resource: ResourceId,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 }
+
+pub mod jobs;
+pub mod workers;
+
+#[derive(Debug, thiserror::Error)]
+#[error("database worker is unavailable")]
+pub struct WorkerUnavailable;

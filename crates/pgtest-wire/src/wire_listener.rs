@@ -155,22 +155,10 @@ mod listener_test {
     use crate::wire_listener;
 
     async fn start_runtime(
-        config: pgtest_database_operations::manager::config::PostgresConfig,
+        config: pgtest_database_operations::config::PostgresConfig,
         engine: WorkerEngineConfig,
-    ) -> Result<pgtest::worker_manager::TokioRuntime, Box<dyn std::error::Error>> {
-        let prepared =
-            pgtest_database_operations::backend::PreparedPostgres::prepare(config).await?;
-        Ok(pgtest::worker_manager::TokioRuntime::start(
-            prepared.backend,
-            pgtest::worker_manager::RuntimeConfig {
-                template: prepared.template,
-                engine,
-                creation_concurrency: prepared.creation_concurrency,
-                cleanup_concurrency: prepared.cleanup_concurrency,
-                stale_resources: prepared.stale_resources,
-            },
-        )
-        .await?)
+    ) -> Result<pgtest::worker_manager::TokioRuntime, pgtest::worker_manager::StartError> {
+        pgtest::worker_manager::TokioRuntime::start(config, engine).await
     }
 
     #[tokio::test]
@@ -200,7 +188,7 @@ mod listener_test {
             assert!(client.is_closed());
             assert!(tokio::net::TcpStream::connect(address).await.is_err());
             drop(engine);
-            runtime.shutdown().await.unwrap();
+            runtime.shutdown().await;
         })
         .await
         .unwrap();
@@ -224,7 +212,7 @@ mod listener_test {
             }
             assert!(tokio::net::TcpStream::connect(address).await.is_err());
             drop(engine);
-            runtime.shutdown().await.unwrap();
+            runtime.shutdown().await;
         })
         .await
         .unwrap();
@@ -326,7 +314,7 @@ mod listener_test {
         listener.shutdown().await;
         assert!(!socket_path.exists());
         drop(engine);
-        runtime.shutdown().await.unwrap();
+        runtime.shutdown().await;
         bridge_tasks.shutdown().await;
     }
 
