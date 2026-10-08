@@ -96,7 +96,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run deterministic runtime without Tokio
-        run: cargo test --locked -p pgtest-core --no-default-features --features test-support
+        run: cargo nextest run --locked -p pgtest-core --no-default-features --features test-support --profile ci
 
       - name: Verify Docker is available
         run: docker info

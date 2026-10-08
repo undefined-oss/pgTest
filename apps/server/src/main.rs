@@ -6,7 +6,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use envconfig::Envconfig;
-use pgtest::{worker_engine::core::WorkerEngineConfig, worker_manager::TokioRuntime};
+use pgtest::{config::ManagerConfig, runtime::TokioRuntime};
 use pgtest_database_operations::config::PostgresConfig;
 use pgtest_pg_wire::{
     listener_addr::ListenAddr,
@@ -50,16 +50,18 @@ async fn main() -> Result<()> {
 
     let postgres_config =
         PostgresConfig::init_from_env().context("invalid PostgreSQL configuration")?;
-    let worker_engine_config =
-        WorkerEngineConfig::init_from_env().context("invalid worker engine configuration")?;
+    let manager_config =
+        ManagerConfig::init_from_env().context("invalid worker engine configuration")?;
 
-    let runtime = TokioRuntime::start(postgres_config, worker_engine_config)
+    let template = postgres_config.pgtest_pg_database.clone();
+    let runtime = TokioRuntime::start(postgres_config, manager_config)
         .await
         .context("failed to start worker engine manager")?;
     let engine = Arc::new(runtime.handle());
     let tcp_listener = wire_listener::run_with_handle(
         engine.clone(),
         SocketAddr::new(server_config.listen_addr.into(), server_config.listen_port.get()),
+        &template,
     )
     .await
     .context("failed to start wire listener")?;
@@ -71,6 +73,7 @@ async fn main() -> Result<()> {
             engine.clone(),
             directory,
             server_config.unix_socket_port.get(),
+            &template,
         )
         .await
         .context("failed to start Unix wire listener")?;

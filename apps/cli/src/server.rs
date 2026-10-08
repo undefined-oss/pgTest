@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use pgtest::worker_manager::TokioRuntime;
+use pgtest::runtime::TokioRuntime;
 use pgtest_pg_wire::wire_listener;
 
 use crate::args::ServeOptions;
@@ -12,7 +12,9 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let startup = TokioRuntime::start(options.postgres_config(), options.engine_config());
+    let postgres_config = options.postgres_config();
+    let template = postgres_config.pgtest_pg_database.clone();
+    let startup = TokioRuntime::start(postgres_config, options.manager_config());
     #[cfg(unix)]
     let engine = tokio::select! {
         result = startup => result.context("failed to start database engine")?,
@@ -29,7 +31,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
 
     let result: Result<()> = async {
         if let Some(address) = options.tcp_address() {
-            let listener = wire_listener::run_with_handle(engine.clone(), address)
+            let listener = wire_listener::run_with_handle(engine.clone(), address, &template)
                 .await
                 .context("failed to start TCP listener")?;
             tracing::info!(address = %listener.local_addr(), "pgtest TCP listening");
@@ -41,6 +43,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
                 engine.clone(),
                 directory,
                 options.unix_socket_port.unwrap_or_default().get(),
+                &template,
             )
             .await
             .context("failed to start Unix listener")?;

@@ -1910,6 +1910,7 @@ dependencies = [
  "pest_derive",
  "pgtest-core",
  "pgtest-database-operations",
+ "pgtest-engine-backend",
  "pgtest-utils",
  "pgwire",
  "testcontainers",

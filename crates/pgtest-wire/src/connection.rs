@@ -1,12 +1,9 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
-use pgtest::{
-    worker_engine::{
-        core::LeaseId,
-        errors::{AttachError, InvalidLeaseId},
-    },
-    worker_manager::ManagerHandle,
+use pgtest::manager_handle::{
+    LeaseId, ManagerHandle,
+    errors::{AttachError, InvalidLeaseId},
 };
 use pgwire::{
     api::auth::protocol_negotiation,
@@ -57,7 +54,11 @@ impl ClientStream {
 }
 
 #[hotpath::measure]
-pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<ManagerHandle>) {
+pub(crate) async fn handle_connection(
+    stream: ClientStream,
+    manager: Arc<ManagerHandle>,
+    template: Arc<str>,
+) {
     let Ok(Some((mut framed, startup))) =
         tokio::time::timeout(Duration::from_secs(60), stream.startup()).await
     else {
@@ -83,19 +84,6 @@ pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<Manager
         return;
     }
 
-    if let Err(error) = protocol_negotiation(&mut framed, &startup).await {
-        tracing::debug!(%error, "client protocol negotiation failed");
-        return;
-    }
-
-    if let Err(error) = framed
-        .send(PgWireBackendMessage::Authentication(pgwire::messages::startup::Authentication::Ok))
-        .await
-    {
-        tracing::debug!(%error, "unable to send client authentication response");
-        return;
-    }
-
     tracing::debug!("connection string is {database}");
 
     let (database_name, lease_id) = match parse_connection_field(&database) {
@@ -112,14 +100,31 @@ pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<Manager
     };
     tracing::debug!("database name {database_name} and lease_id {lease_id}");
 
-    let lease_session = match manager.attach(database_name, lease_id).await {
+    if database_name != template.as_ref() {
+        reject_connection(&mut framed, "3D000", "database does not match the configured template")
+            .await;
+        return;
+    }
+
+    if let Err(error) = protocol_negotiation(&mut framed, &startup).await {
+        tracing::debug!(%error, "client protocol negotiation failed");
+        return;
+    }
+
+    if let Err(error) = framed
+        .send(PgWireBackendMessage::Authentication(pgwire::messages::startup::Authentication::Ok))
+        .await
+    {
+        tracing::debug!(%error, "unable to send client authentication response");
+        return;
+    }
+
+    let lease_session = match manager.attach(lease_id).await {
         Ok(session) => session,
         Err(error) => {
             let code = match error {
                 AttachError::InvalidLeaseId => "22023",
-                AttachError::LeaseRecordLimitReached => "53400",
                 AttachError::LeaseClosed => "55000",
-                AttachError::TemplateMismatch => "3D000",
                 _ => "08006",
             };
             reject_connection(&mut framed, code, &error.to_string()).await;

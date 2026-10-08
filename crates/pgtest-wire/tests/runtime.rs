@@ -2,8 +2,9 @@
 use std::{collections::HashSet, num::NonZeroUsize};
 
 use pgtest::{
-    worker_engine::core::{LeaseId, WorkerEngineConfig},
-    worker_manager::{StartError, TokioRuntime},
+    config::ManagerConfig,
+    manager_handle::LeaseId,
+    runtime::{StartError, TokioRuntime},
 };
 use pgtest_database_operations::{
     backend::{PreparedPostgres, bootstrap},
@@ -12,25 +13,23 @@ use pgtest_database_operations::{
     testcontainer::pg_container_config,
 };
 
-fn engine(initial: u16) -> WorkerEngineConfig {
-    WorkerEngineConfig {
+fn engine(initial: u16) -> ManagerConfig {
+    ManagerConfig {
         initial_slots: initial.into(),
         grow_batch_size: 0.into(),
         lease_claim_timeout_ms: 0,
-        ..WorkerEngineConfig::default()
+        ..ManagerConfig::default()
     }
 }
 #[tokio::test]
 async fn startup_prefills_large_batch_using_one_administrative_connection() {
     let mut config = pg_container_config().await;
     config.pgtest_pg_creation_pool_connection = NonZeroUsize::MIN.into();
-    let template = config.pgtest_pg_database.to_string();
     let runtime = TokioRuntime::start(config, engine(33)).await.unwrap();
     let handle = runtime.handle();
     let mut targets = HashSet::new();
     for index in 0..33 {
-        let session =
-            handle.attach(&template, LeaseId::new(index.to_string()).unwrap()).await.unwrap();
+        let session = handle.attach(LeaseId::new(index.to_string()).unwrap()).await.unwrap();
         assert!(targets.insert(session.target.database.clone()));
     }
     assert_eq!(targets.len(), 33);
@@ -60,10 +59,8 @@ async fn initial_creation_failure_returns_error_without_panicking() {
 #[tokio::test]
 async fn startup_reconciliation_preserves_another_managers_active_resource() {
     let first_config = pg_container_config().await;
-    let template = first_config.pgtest_pg_database.to_string();
     let first_runtime = TokioRuntime::start(first_config.clone(), engine(1)).await.unwrap();
-    let session =
-        first_runtime.handle().attach(&template, LeaseId::new("active").unwrap()).await.unwrap();
+    let session = first_runtime.handle().attach(LeaseId::new("active").unwrap()).await.unwrap();
     let second_config = pg_container_config().await;
     // Simulate a resource left behind before the next runtime starts.
     let metadata = bootstrap(&second_config).await.unwrap();
@@ -104,7 +101,7 @@ fn postgres_preparation_and_runtime_startup_fit_stack_budget() {
 }
 
 #[tokio::test]
-async fn cleanup_initialization_failure_joins_creation_and_releases_its_connection() {
+async fn worker_initialization_failure_releases_worker_connections() {
     let mut config = pg_container_config().await;
     let (setup, driver) = admin(&config).await;
     let role = format!("{}_limited", config.pgtest_pg_database);
@@ -150,7 +147,7 @@ async fn cleanup_initialization_failure_joins_creation_and_releases_its_connecti
 }
 
 #[tokio::test]
-async fn cancelled_worker_initialization_releases_bootstrap_and_creation_connections() {
+async fn concurrent_worker_initialization_releases_connections_when_cancelled() {
     use tokio::{
         io::AsyncReadExt,
         net::{TcpListener, TcpStream},
@@ -171,13 +168,13 @@ async fn cancelled_worker_initialization_releases_bootstrap_and_creation_connect
             let upstream = upstream.clone();
             let closed = closed_tx.clone();
             tasks.spawn(async move {
-                if index < 2 {
+                if index != 1 {
                     let mut remote =
                         TcpStream::connect((upstream.0.as_str(), upstream.1)).await.unwrap();
                     let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
                 } else {
-                    // Hold cleanup's PostgreSQL handshake after creation is
-                    // ready.
+                    // Hold the first worker's handshake. The other worker
+                    // must still connect before this handshake completes.
                     let mut buffer = [0; 1024];
                     while local.read(&mut buffer).await.unwrap_or(0) > 0 {}
                 }

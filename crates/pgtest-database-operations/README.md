@@ -34,7 +34,7 @@ temporary connection. Bootstrap closes that connection before returning
 `PostgresConfig` and `PostgresMetadata`; it starts no workers. Cleanup failures
 warn and continue; validation failures stop startup.
 
-The runtime then directly calls `CreationHandle::new` and `CleanupHandle::new`.
+The runtime then concurrently calls `CreationHandle::new` and `CleanupHandle::new`.
 Each constructor initializes its own PostgreSQL client, creates its inbox, spawns
 `actor.run()` with `tokio::spawn`, and returns the concrete handle. Creation uses
 `pgtest_pg_creation_pool_connection`; Cleanup uses
@@ -64,9 +64,9 @@ retain the original explicit shutdown behavior. A failed constructor cancels and
 waits for already-started work; worker panics do not cancel sibling actors.
 
 ```rust,ignore
-use pgtest::worker_manager::TokioRuntime;
+use pgtest::runtime::TokioRuntime;
 
-let runtime = TokioRuntime::start(postgres_config, engine_config).await?;
+let runtime = TokioRuntime::start(postgres_config, manager_config).await?;
 let manager = runtime.handle(); // Pass this to the wire listener.
 // Keep runtime alive while listeners serve connections.
 runtime.shutdown().await;
@@ -86,11 +86,11 @@ is gated with `cfg(test)` in `testcontainer.rs`.
 
 ```sh
 # Three Tokio actors with controlled clients; no Docker.
-cargo test -p pgtest-core --features runtime-tests worker_manager::tests
+cargo nextest run -p pgtest-core --features runtime-tests runtime::tests
 # Synchronous simulation without Tokio.
-cargo test -p pgtest-core --no-default-features --features test-support
+cargo nextest run -p pgtest-core --no-default-features --features test-support
 # PostgreSQL operations and runtime initialization; requires Docker.
-cargo test -p pgtest-database-operations -p pgtest-wire
+cargo nextest run -p pgtest-database-operations -p pgtest-wire
 ```
 
 Mock-client constructors and bulk-operation helpers used exclusively by tests

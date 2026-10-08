@@ -201,12 +201,14 @@ mod unix {
         );
         let _ = application_task.await.unwrap();
         assert!(application.is_closed());
-        assert!(frontend.connect(NoTls).await.is_err());
 
-        // Leave both an application session and a control session open at
-        // shutdown.
-        frontend.dbname(&format!("{}/lease-2", upstream.pgtest_pg_database));
+        // Reusing a released lease ID assigns a fresh database. Leave this
+        // application session and the control session open at shutdown.
         let (active, active_task) = connect(&frontend).await;
+        let replacement: String =
+            active.query_one("SELECT current_database()", &[]).await.unwrap().get(0);
+        assert_ne!(replacement, database);
+        assert!(replacement.starts_with(&format!("{}_", upstream.pgtest_pg_database)));
         assert!(
             Command::new("kill")
                 .args([signal, &child.id().unwrap().to_string()])

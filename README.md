@@ -183,7 +183,7 @@ psql 'host=127.0.0.1 port=6432 user=postgres dbname=pgtest sslmode=disable' \
 ```
 
 Release closes active connections for that lease and schedules its database for
-cleanup. The ID cannot be reused during that PgTest process. Leases also expire
+cleanup. Reusing the ID gets a fresh database. Leases also expire
 after **30 seconds** by default, measured from database assignment. For longer
 tests, increase `--lease-claim-timeout-ms` or `PGTEST_LEASE_CLAIM_TIMEOUT_MS`; `0`
 disables expiry. Run the connection and release examples within that interval.
@@ -297,9 +297,8 @@ can share an active lease to reduce database creation when they are read-only
 or explicitly manage shared state. Independent tests can still interfere with
 each other if they modify the same database.
 
-A released lease ID cannot be reused during the same PgTest process. An expired
-lease ID can reconnect, but receives a fresh database cloned from the template;
-do not rely on its previous data remaining available.
+A released or expired lease ID can reconnect, but receives a fresh database cloned
+from the template; do not rely on its previous data remaining available.
 
 ### Hash migration files in watch mode
 
@@ -340,7 +339,6 @@ TCP; its Unix listener is optional.
 | `--pool-starvation-threshold` | `PGTEST_POOL_STARVATION_THRESHOLD` | `8`                    | Ready-database threshold for replenishment.                                             |
 | `--pool-grow-batch-size`      | `PGTEST_POOL_GROW_BATCH_SIZE`      | `16`                   | Databases created per growth batch; `0` disables growth.                                |
 | `--lease-claim-timeout-ms`    | `PGTEST_LEASE_CLAIM_TIMEOUT_MS`    | `30000`                | Lease lifetime and pending-claim timeout, in milliseconds; `0` disables these timeouts. |
-| `--max-lease-records`         | `PGTEST_MAX_LEASE_RECORDS`         | `100000`               | Maximum admitted lease IDs, including pending and closed leases.                        |
 | `--log-filter`                | `RUST_LOG`                         | `info`                 | Tracing filter, such as `info` or `debug`.                                              |
 
 A single default in the table applies to both executables. For the CLI,

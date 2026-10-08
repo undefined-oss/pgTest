@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use pgtest::{worker_engine::core::LeaseId, worker_manager::ManagerHandle};
+use pgtest::manager_handle::{LeaseId, ManagerHandle};
 use pgwire::{
     api::{
         PgWireServerHandlers,

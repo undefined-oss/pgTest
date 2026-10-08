@@ -35,7 +35,7 @@ test:
 
 # Test all three actors with controlled clients (no Docker)
 test-runtime:
-    cargo test --locked -p pgtest-core --features runtime-tests worker_manager::tests
+    cargo nextest run --locked -p pgtest-core --features runtime-tests --no-fail-fast runtime::tests
 
 # Build and open the docs of this crate
 doc:

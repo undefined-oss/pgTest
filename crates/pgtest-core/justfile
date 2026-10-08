@@ -30,19 +30,22 @@ build:
 
 # Run shared logic and Tokio driver tests (no Docker)
 test:
-    cargo test --locked -p {{crate}} --features runtime-tests
+    cargo nextest run --locked -p {{crate}} --features runtime-tests --no-fail-fast
+    cargo test --locked -p {{crate}} --features runtime-tests --doc --no-fail-fast
 
 # Verify deterministic simulation without Tokio in the dependency graph
 test-unit:
-    cargo test --locked -p {{crate}} --no-default-features --features test-support
+    cargo nextest run --locked -p {{crate}} --no-default-features --features test-support --no-fail-fast
+    cargo test --locked -p {{crate}} --no-default-features --features test-support --doc --no-fail-fast
 
 # Test Manager transport, reply ownership, and cancellation
 test-runtime:
-    cargo test --locked -p {{crate}} --features runtime-tests worker_manager::tests
+    cargo nextest run --locked -p {{crate}} --features runtime-tests --no-fail-fast runtime::tests
 
 # PostgreSQL-backed runtime and wire tests live at the composition boundary
 test-integration:
-    cargo test --locked -p pgtest-wire
+    cargo nextest run --locked -p pgtest-wire --no-fail-fast
+    cargo test --locked -p pgtest-wire --doc --no-fail-fast
 
 # Build and open the docs of this crate
 doc:

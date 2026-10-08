@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, io};
 
 use bytes::BytesMut;
+use pgtest_engine_backend::{PgEndpoint, PgTarget};
 use pgwire::{
     error::PgWireError,
     messages::{
@@ -56,14 +57,12 @@ pub(crate) struct UpstreamSession {
 
 #[hotpath::measure]
 pub(crate) async fn connect(
-    target: &pgtest::backend::PgTarget,
+    target: &PgTarget,
     client_params: &BTreeMap<String, String>,
 ) -> Result<UpstreamSession, UpstreamError> {
     let (host, port) = match &target.endpoint {
-        pgtest::backend::PgEndpoint::Tcp { host, port } => (host.clone(), *port),
-        pgtest::backend::PgEndpoint::Unix { directory, port } => {
-            (directory.to_string_lossy().into_owned(), *port)
-        }
+        PgEndpoint::Tcp { host, port } => (host.clone(), *port),
+        PgEndpoint::Unix { directory, port } => (directory.to_string_lossy().into_owned(), *port),
     };
     let mut stream = connect_stream(&host, port).await?;
     let mut decode_buffer = authenticate(&mut stream, &target.database, client_params).await?;
@@ -255,9 +254,9 @@ mod tests {
                 }
             };
             let params = BTreeMap::from([("user".to_owned(), "postgres".to_owned())]);
-            let target = pgtest::backend::PgTarget {
+            let target = PgTarget {
                 database: "test".into(),
-                endpoint: pgtest::backend::PgEndpoint::Tcp { host: "127.0.0.1".into(), port },
+                endpoint: PgEndpoint::Tcp { host: "127.0.0.1".into(), port },
             };
             let (result, ()) = tokio::join!(connect(&target, &params), backend);
             result

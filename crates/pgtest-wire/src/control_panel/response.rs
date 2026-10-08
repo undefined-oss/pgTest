@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::stream;
-use pgtest::worker_engine::errors::ReleaseError;
+use pgtest::manager_handle::errors::ReleaseError;
 use pgwire::{
     api::{
         Type,
@@ -57,7 +57,6 @@ pub(super) fn unsupported_command() -> PgWireError {
 pub(super) fn release_error(error: ReleaseError) -> PgWireError {
     let code = match error {
         ReleaseError::InvalidLeaseId => "22023",
-        ReleaseError::LeaseRecordLimitReached => "53400",
         ReleaseError::EngineUnavailable => "08006",
         ReleaseError::ReplyTimedOut => "57014",
         ReleaseError::UnexpectedReply => "XX000",

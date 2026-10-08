@@ -7,16 +7,25 @@ use std::{
     time::Duration,
 };
 
-use pgtest_engine_backend::{BackendError, ProvisionedDatabase};
-
-use crate::worker_engine::{
-    core::{LeaseId, WorkerEngine, WorkerEngineConfig},
-    database_jobs::{CleanupDatabase, CreateDatabases, DatabaseId},
-    errors::IOError,
-    messages::{ConsumerReply, EngineMessage, LeaseKey, RequestId, Tick},
-    traits::EngineIO,
+use pgtest_engine_backend::{
+    BackendError, ProvisionedDatabase,
+    jobs::{CleanupDatabase, CreateDatabases, DatabaseId, DatabaseWorkerMessages},
     workers::{CleanupAction, CleanupState, CreationAction, CreationState},
 };
+
+use crate::{
+    config::ManagerConfig,
+    manager_handle::{
+        database_inventory::DatabaseInventory,
+        errors::{AttachError, IOError, ReleaseError},
+        lease::{LeaseId, LeaseKey},
+        manager_worker::{ManagerIO, ManagerWorker},
+        messages::{ConsumerReply, ElapsedTime, ManagerMessage},
+    },
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RequestId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActorId {
@@ -39,9 +48,9 @@ pub enum ReplySlot {
 
 struct Timer {
     key: LeaseKey,
-    deadline: Tick,
+    deadline: ElapsedTime,
     sequence: u64,
-    message: EngineMessage,
+    message: ManagerMessage<RequestId>,
 }
 enum CreationInput {
     Command(CreateDatabases),
@@ -53,7 +62,7 @@ enum CleanupInput {
 }
 #[derive(Default)]
 struct Shared {
-    manager: VecDeque<EngineMessage>,
+    manager: VecDeque<ManagerMessage<RequestId>>,
     creation: VecDeque<CreationInput>,
     cleanup: VecDeque<CleanupInput>,
     replies: BTreeMap<RequestId, ReplySlot>,
@@ -66,7 +75,9 @@ struct Shared {
 }
 #[derive(Clone)]
 pub struct SimPorts(Rc<RefCell<Shared>>);
-impl EngineIO for SimPorts {
+impl ManagerIO for SimPorts {
+    type ReplyHandle = RequestId;
+
     fn request_creation(&mut self, request: CreateDatabases) -> Result<(), IOError> {
         let mut s = self.0.borrow_mut();
         if s.closed[1] || std::mem::take(&mut s.fail_next[1]) {
@@ -97,7 +108,12 @@ impl EngineIO for SimPorts {
         Ok(())
     }
 
-    fn schedule(&mut self, key: LeaseKey, deadline: Tick, message: EngineMessage) {
+    fn schedule(
+        &mut self,
+        key: LeaseKey,
+        deadline: ElapsedTime,
+        message: ManagerMessage<RequestId>,
+    ) {
         let mut s = self.0.borrow_mut();
         s.sequence += 1;
         let sequence = s.sequence;
@@ -112,49 +128,55 @@ impl EngineIO for SimPorts {
 }
 
 pub struct SimRuntime {
-    manager: WorkerEngine<SimPorts>,
+    manager: ManagerWorker<SimPorts>,
     creation: CreationState,
     cleanup: CleanupState,
     shared: Rc<RefCell<Shared>>,
-    now: Tick,
+    now: ElapsedTime,
     next_request: u64,
     claim_timeout: Duration,
-    deadlines: BTreeMap<RequestId, (Tick, bool)>,
+    deadlines: BTreeMap<RequestId, (ElapsedTime, bool)>,
     active_creation: BTreeMap<u64, DatabaseId>,
     active_cleanup: BTreeMap<u64, CleanupDatabase>,
     round_robin: usize,
+    startup_result: Option<Result<(), BackendError>>,
 }
 impl SimRuntime {
-    pub fn new(config: WorkerEngineConfig) -> Self {
-        Self::with_options(
-            config,
-            "template".into(),
-            NonZeroUsize::new(10).unwrap(),
-            NonZeroUsize::new(5).unwrap(),
-        )
+    pub fn new(config: ManagerConfig) -> Self {
+        Self::with_options(config, NonZeroUsize::new(10).unwrap(), NonZeroUsize::new(5).unwrap())
     }
 
     pub fn with_options(
-        config: WorkerEngineConfig,
-        template: String,
+        config: ManagerConfig,
         creation_limit: NonZeroUsize,
         cleanup_limit: NonZeroUsize,
     ) -> Self {
         let shared = Rc::new(RefCell::new(Shared::default()));
-        let mut manager = WorkerEngine::new(config, template, SimPorts(shared.clone()));
-        manager.initialize();
+        let mut inventory = DatabaseInventory::default();
+        let mut ports = SimPorts(shared.clone());
+        if let Some(request) = inventory.reserve_creations(usize::from(*config.initial_slots)) {
+            ports.request_creation(request).expect("new simulation has open worker inboxes");
+        }
+        let startup_result = inventory.creating().is_empty().then_some(Ok(()));
+        let manager = ManagerWorker::new(config, inventory, ports);
         Self {
             manager,
             shared,
             creation: CreationState::new(creation_limit),
             cleanup: CleanupState::new(cleanup_limit),
-            now: Tick::default(),
+            now: ElapsedTime::default(),
             next_request: 0,
-            claim_timeout: Duration::from_millis(config.lease_claim_timeout_ms),
+            claim_timeout: Duration::from_nanos_u128(
+                config
+                    .lease_claim_timeout_ms
+                    .checked_mul(1_000_000)
+                    .expect("lease timeout is too large"),
+            ),
             deadlines: BTreeMap::new(),
             active_creation: BTreeMap::new(),
             active_cleanup: BTreeMap::new(),
             round_robin: 0,
+            startup_result,
         }
     }
 
@@ -167,13 +189,17 @@ impl SimRuntime {
         id
     }
 
-    pub fn attach(&mut self, template: &str, lease: &str) -> RequestId {
+    pub fn attach(&mut self, lease: &str) -> RequestId {
         let reply = self.request();
-        if !self.claim_timeout.is_zero() {
-            self.deadlines.insert(reply, (Tick(self.now.0 + self.claim_timeout), true));
+        if self.startup_result.is_none() {
+            let _ = SimPorts(self.shared.clone())
+                .reply(reply, ConsumerReply::AttachRejected(AttachError::EngineUnavailable));
+            return reply;
         }
-        self.inject(EngineMessage::AttachOrJoin {
-            template: template.into(),
+        if !self.claim_timeout.is_zero() {
+            self.deadlines.insert(reply, (ElapsedTime(self.now.0 + self.claim_timeout), true));
+        }
+        self.inject(ManagerMessage::AttachOrJoin {
             lease: LeaseId::new(lease).unwrap(),
             reply,
             message_time: self.now,
@@ -183,14 +209,19 @@ impl SimRuntime {
 
     pub fn release(&mut self, lease: &str) -> RequestId {
         let reply = self.request();
-        self.deadlines.insert(reply, (Tick(self.now.0 + Duration::from_secs(5)), false));
-        self.inject(EngineMessage::ReleaseLease { lease: LeaseId::new(lease).unwrap(), reply });
+        if self.startup_result.is_none() {
+            let _ = SimPorts(self.shared.clone())
+                .reply(reply, ConsumerReply::ReleaseResult(Err(ReleaseError::EngineUnavailable)));
+            return reply;
+        }
+        self.deadlines.insert(reply, (ElapsedTime(self.now.0 + Duration::from_secs(5)), false));
+        self.inject(ManagerMessage::ReleaseLease { lease: LeaseId::new(lease).unwrap(), reply });
         reply
     }
 
     /// Inject duplicate/stale messages without pretending they are active
     /// operations.
-    pub fn inject(&mut self, message: EngineMessage) {
+    pub fn inject(&mut self, message: ManagerMessage<RequestId>) {
         if !self.shared.borrow().closed[0] {
             self.shared.borrow_mut().manager.push_back(message);
         }
@@ -204,12 +235,9 @@ impl SimRuntime {
         self.drop_session(id);
     }
 
-    /// A delivered reply owns a session even before a caller reads it.
+    /// Dropping a reply or session does not release an assigned lease.
     pub fn drop_session(&mut self, id: RequestId) {
-        let old = self.shared.borrow_mut().replies.insert(id, ReplySlot::Cancelled);
-        if let Some(ReplySlot::Delivered(ConsumerReply::Attached { key, .. })) = old {
-            self.inject(EngineMessage::Detach { lease: key.lease, generation: key.generation });
-        }
+        self.shared.borrow_mut().replies.insert(id, ReplySlot::Cancelled);
     }
 
     pub fn session_cancelled(&self, key: &LeaseKey) -> bool {
@@ -238,7 +266,7 @@ impl SimRuntime {
         self.shared.borrow_mut().cleanup.push_back(CleanupInput::Complete(id, result));
     }
 
-    pub fn now(&self) -> Tick {
+    pub fn now(&self) -> ElapsedTime {
         self.now
     }
 
@@ -254,10 +282,10 @@ impl SimRuntime {
                 return true;
             }
             let reply = if *attach {
-                ConsumerReply::AttachRejected(crate::worker_engine::errors::AttachError::TimedOut)
+                ConsumerReply::AttachRejected(crate::manager_handle::errors::AttachError::TimedOut)
             } else {
                 ConsumerReply::ReleaseResult(Err(
-                    crate::worker_engine::errors::ReleaseError::ReplyTimedOut,
+                    crate::manager_handle::errors::ReleaseError::ReplyTimedOut,
                 ))
             };
             s.replies.insert(*id, ReplySlot::Delivered(reply));
@@ -274,7 +302,11 @@ impl SimRuntime {
         }
     }
 
-    pub fn snapshot(&self) -> &WorkerEngine<SimPorts> {
+    pub fn startup_result(&self) -> Option<&Result<(), BackendError>> {
+        self.startup_result.as_ref()
+    }
+
+    pub fn snapshot(&self) -> &ManagerWorker<SimPorts> {
         &self.manager
     }
 
@@ -283,7 +315,7 @@ impl SimRuntime {
     }
 
     pub fn step(&mut self, actor: ActorId) -> StepResult {
-        if self.manager.is_stopped() {
+        if self.shared.borrow().closed.iter().all(|closed| *closed) {
             return StepResult::Stopped;
         }
         match actor {
@@ -292,9 +324,32 @@ impl SimRuntime {
                     return StepResult::Idle;
                 };
                 self.shared.borrow_mut().trace.push(format!("manager {message:?}"));
-                self.manager.handle(message, self.now);
-                if self.manager.is_stopped() {
+                if matches!(message, ManagerMessage::Shutdown) {
                     self.stop();
+                    return StepResult::Stopped;
+                }
+                if self.startup_result.is_none() {
+                    // Consume initial results in the runtime before dispatching
+                    // to Manager.
+                    let ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationFinished {
+                        database_id,
+                        result,
+                    }) = message
+                    else {
+                        panic!("only creation results can arrive during startup");
+                    };
+                    if let Some(Err(error)) =
+                        self.manager.inventory.complete_creation(database_id, result)
+                    {
+                        self.startup_result = Some(Err(error));
+                        self.stop();
+                        return StepResult::Stopped;
+                    }
+                    if self.manager.inventory.creating().is_empty() {
+                        self.startup_result = Some(Ok(()));
+                    }
+                } else {
+                    self.manager.handle(message, self.now);
                 }
             }
             ActorId::Creation => {
@@ -312,7 +367,7 @@ impl SimRuntime {
                             self.shared.borrow_mut().trace.push(format!("begin create {id:?}"));
                         }
                         CreationAction::Report(event) => {
-                            self.inject(EngineMessage::DatabaseWorker(event))
+                            self.inject(ManagerMessage::DatabaseWorker(event))
                         }
                     }
                 }
@@ -335,7 +390,7 @@ impl SimRuntime {
                             self.active_cleanup.insert(r.database_id.0, r);
                         }
                         CleanupAction::Report(event) => {
-                            self.inject(EngineMessage::DatabaseWorker(event))
+                            self.inject(ManagerMessage::DatabaseWorker(event))
                         }
                     }
                 }
@@ -370,7 +425,7 @@ impl SimRuntime {
 
     pub fn close_mailbox(&mut self, actor: ActorId) {
         self.shared.borrow_mut().closed[actor as usize] = true;
-        // Runtime supervision treats loss of any worker as fatal.
+        // Closing a mailbox explicitly stops this simulation.
         self.stop();
     }
 
@@ -379,6 +434,9 @@ impl SimRuntime {
     }
 
     fn stop(&mut self) {
+        if self.shared.borrow().closed.iter().all(|closed| *closed) {
+            return;
+        }
         self.manager.shutdown();
         self.creation.stop();
         self.cleanup.stop();

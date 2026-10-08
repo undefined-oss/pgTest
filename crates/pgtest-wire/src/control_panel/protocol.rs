@@ -2,7 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
 use futures::{Sink, SinkExt};
-use pgtest::worker_engine::{core::LeaseId, errors::ReleaseError};
+use pgtest::manager_handle::{LeaseId, errors::ReleaseError};
 use pgwire::{
     api::{
         ClientInfo, ClientPortalStore, DEFAULT_NAME, Type,
