@@ -56,10 +56,6 @@ impl WorkerEngineManager {
         postgres_config: PostgresConfig,
         worker_engine_config: WorkerEngineConfig,
     ) -> Result<Self, StartError> {
-        if worker_engine_config.max_lease_records == 0 {
-            return Err(StartError::InvalidLeaseRecordLimit);
-        }
-
         let postgres_client = startup::prepare_postgres(postgres_config).await?;
         startup::start_workers(postgres_client, worker_engine_config).await
     }
@@ -250,7 +246,8 @@ mod worker_engine_manager_test {
                     .await
                     .expect("creation must be queued")
                     .expect("creation channel must be open");
-                self.pending.extend((0..request.amount).map(|index| request.database_id(index)));
+                self.pending
+                    .extend((0..request.amount.get()).map(|index| request.database_id(index)));
             }
             let database_id = self.pending.pop_front().expect("creation batch must be nonempty");
             let database_name =
@@ -336,7 +333,10 @@ mod worker_engine_manager_test {
     #[tokio::test]
     async fn startup_prefills_a_large_batch_on_one_connection() {
         let manager = WorkerEngineManager::start(
-            PostgresConfig { pgtest_pg_creation_pool_connection: 1, ..pg_container_config().await },
+            PostgresConfig {
+                pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN,
+                ..pg_container_config().await
+            },
             WorkerEngineConfig { initial_slots: 33, ..WorkerEngineConfig::default() },
         )
         .await
@@ -379,7 +379,7 @@ mod worker_engine_manager_test {
         let mut options = Config::new();
         options
             .host(&first_config.pgtest_pg_host)
-            .port(first_config.pgtest_pg_port)
+            .port(first_config.pgtest_pg_port.get())
             .user(&first_config.pgtest_pg_user)
             .password("postgres")
             .dbname("postgres");

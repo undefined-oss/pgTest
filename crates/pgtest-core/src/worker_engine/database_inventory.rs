@@ -25,7 +25,7 @@ mod tests {
         let batch = inventory.reserve_creations(3).unwrap();
         assert_eq!(batch.first_database_id, DatabaseId(1));
         assert_eq!(inventory.creating.len(), 3);
-        for index in 0..batch.amount {
+        for index in 0..batch.amount.get() {
             assert!(inventory.cancel_creation(batch.database_id(index)));
         }
         let next = inventory.reserve_creations(2).unwrap();
@@ -59,16 +59,14 @@ pub struct DatabaseInventory {
 
 impl DatabaseInventory {
     pub fn reserve_creations(&mut self, amount: usize) -> Option<CreateDatabases> {
-        if amount == 0 {
-            return None;
-        }
+        let amount = std::num::NonZeroUsize::new(amount)?;
         let last = self
             .next_database_id
-            .checked_add(u64::try_from(amount).expect("database identity exhausted"))
+            .checked_add(u64::try_from(amount.get()).expect("database identity exhausted"))
             .expect("database identity exhausted");
         let request =
             CreateDatabases { first_database_id: DatabaseId(self.next_database_id + 1), amount };
-        self.creating.extend((0..amount).map(|index| request.database_id(index)));
+        self.creating.extend((0..amount.get()).map(|index| request.database_id(index)));
         self.next_database_id = last;
         Some(request)
     }

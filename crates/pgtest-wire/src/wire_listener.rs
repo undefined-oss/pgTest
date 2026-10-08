@@ -252,11 +252,11 @@ mod listener_test {
             std::fs::create_dir(&upstream_directory).unwrap();
             let listener = crate::unix_listener::BoundUnixListener::bind(
                 &upstream_directory,
-                pg_config.pgtest_pg_port,
+                pg_config.pgtest_pg_port.get(),
             )
             .unwrap();
             let host = pg_config.pgtest_pg_host.clone();
-            let port = pg_config.pgtest_pg_port;
+            let port = pg_config.pgtest_pg_port.get();
             bridge_tasks.spawn(async move {
                 let mut sessions = tokio::task::JoinSet::new();
                 loop {

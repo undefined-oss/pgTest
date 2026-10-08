@@ -1,4 +1,6 @@
-use std::{collections::VecDeque, marker::PhantomData, sync::Arc, time::Instant};
+use std::{
+    collections::VecDeque, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Instant,
+};
 
 use envconfig::Envconfig;
 use pgtest_utils::read_string::ReadString;
@@ -26,7 +28,7 @@ pub struct WorkerEngineConfig {
     pub lease_claim_timeout_ms: u64,
     /// Counts every distinct admitted ID, including pending and closed leases.
     #[envconfig(from = "PGTEST_MAX_LEASE_RECORDS", default = "100000")]
-    pub max_lease_records: usize,
+    pub max_lease_records: NonZeroUsize,
 }
 
 pub use super::lease_id::LeaseId;
@@ -122,7 +124,7 @@ where
         let mut first_error = None;
         let inventory = &mut self.inventory;
         self.pg_client
-            .create_databases(request.amount, |index, result| {
+            .create_databases(request.amount.get(), |index, result| {
                 let database_id = request.database_id(index);
                 if let Ok(database_name) = &result {
                     tracing::info!(?database_id, %database_name, "created initial database");
@@ -223,7 +225,7 @@ where
         if let Some(status) = self.lease_records.get(lease) {
             return Ok(*status);
         }
-        if self.lease_records.len() >= self.config.max_lease_records {
+        if self.lease_records.len() >= self.config.max_lease_records.get() {
             return Err(ReleaseError::LeaseRecordLimitReached);
         }
         self.lease_records.insert(lease.clone(), LeaseStatus::Open);
@@ -437,7 +439,7 @@ where
 
         let request = self.inventory.reserve_creations(count).expect("growth count is nonzero");
         if let Err(error) = self.engine_io.request_creation(request) {
-            for index in 0..request.amount {
+            for index in 0..request.amount.get() {
                 self.inventory.cancel_creation(request.database_id(index));
             }
             self.counters.unable_to_start_database_slots +=
@@ -479,7 +481,46 @@ impl Default for WorkerEngineConfig {
             grow_batch_size: 4,
 
             lease_claim_timeout_ms: 30_000,
-            max_lease_records: 100_000,
+            max_lease_records: std::num::NonZeroUsize::new(100_000).unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn lease_record_limit_must_be_positive() {
+        for invalid in ["0", "-1", "invalid", "184467440737095516160"] {
+            let vars = HashMap::from([("PGTEST_MAX_LEASE_RECORDS".to_owned(), invalid.to_owned())]);
+            assert!(WorkerEngineConfig::init_from_hashmap(&vars).is_err(), "{invalid}");
+        }
+        let vars = HashMap::from([("PGTEST_MAX_LEASE_RECORDS".to_owned(), "1".to_owned())]);
+        assert_eq!(
+            WorkerEngineConfig::init_from_hashmap(&vars).unwrap().max_lease_records.get(),
+            1
+        );
+    }
+
+    #[test]
+    fn zero_settings_keep_their_existing_meaning() {
+        let vars: HashMap<_, _> = [
+            "PGTEST_POOL_INITIAL_SIZE",
+            "PGTEST_POOL_STARVATION_THRESHOLD",
+            "PGTEST_POOL_GROW_BATCH_SIZE",
+            "PGTEST_LEASE_CLAIM_TIMEOUT_MS",
+        ]
+        .into_iter()
+        .map(|key| (key.to_owned(), "0".to_owned()))
+        .collect();
+        let config = WorkerEngineConfig::init_from_hashmap(&vars).unwrap();
+        assert_eq!(config.initial_slots, 0);
+        assert_eq!(config.starvation_threshold, 0);
+        assert_eq!(config.grow_batch_size, 0);
+        assert_eq!(config.lease_claim_timeout_ms, 0);
+        assert_eq!(config.max_lease_records.get(), 100_000);
     }
 }

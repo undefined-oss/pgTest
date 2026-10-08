@@ -43,7 +43,9 @@ struct DeferredIO {
 impl EngineIO<ConsumerWorker> for DeferredIO {
     fn request_creation(&self, request: CreateDatabases) -> Result<(), IOError> {
         let mut operations = self.operations.lock().unwrap();
-        operations.creates.extend((0..request.amount).map(|index| request.database_id(index)));
+        operations
+            .creates
+            .extend((0..request.amount.get()).map(|index| request.database_id(index)));
         operations.creation_batches.push(request);
         operations.create_results.pop_front().unwrap_or(Ok(()))
     }
@@ -281,7 +283,7 @@ async fn release_fails_all_waiters_without_consuming_the_shared_creation() {
 async fn record_limit_reserves_room_for_closing_existing_leases() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
         initial_slots: 1,
-        max_lease_records: 2,
+        max_lease_records: std::num::NonZeroUsize::new(2).unwrap(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -482,7 +484,7 @@ async fn covered_burst_does_not_schedule_redundant_batches() {
     let batches = &fixture.io.operations.lock().unwrap().creation_batches;
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].first_database_id, DatabaseId(2));
-    assert_eq!(batches[0].amount, 4);
+    assert_eq!(batches[0].amount.get(), 4);
     assert!(fixture.engine.inventory.ready().is_empty());
     assert_eq!(fixture.consumer.messages().len(), 1);
 }

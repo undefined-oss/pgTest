@@ -137,11 +137,11 @@ pub(crate) async fn handle_connection(stream: ClientStream, manager: Arc<WorkerE
             &lease_session.database_name,
             params,
             &manager.pg_client.host,
-            manager.pg_client.port,
+            manager.pg_client.port.get(),
         ) => match result {
             Ok(session) => session,
             Err(error) => {
-                tracing::warn!(%error, host = %manager.pg_client.host, port = manager.pg_client.port, "upstream connection failed");
+                tracing::warn!(%error, host = %manager.pg_client.host, port = manager.pg_client.port.get(), "upstream connection failed");
                 reject_connection(&mut framed, "08006", "unable to connect to PostgreSQL").await;
                 return;
             }

@@ -90,7 +90,7 @@ impl<'a> WorkerEngineIO<'a> {
 
 impl<'a> EngineIO<ConsumerWorker> for WorkerEngineIO<'a> {
     fn request_creation(&self, request: CreateDatabases) -> Result<(), IOError> {
-        for index in 0..request.amount {
+        for index in 0..request.amount.get() {
             let request_number = self.messages_pushed.fetch_add(1, Ordering::SeqCst) + 1;
 
             let result = if self.fail && request_number == self.operations_before_fail {
@@ -339,7 +339,7 @@ impl EngineIO<ConsumerWorker> for ScriptedWorkerIO {
             .pop_front()
             .expect("request_creation called more times than scripted")?;
 
-        for index in 0..request.amount {
+        for index in 0..request.amount.get() {
             let database_name = ReadString::from(format!("grow_{}", request.database_id(index).0));
 
             self.send_message(EngineMessage::DatabaseWorker(

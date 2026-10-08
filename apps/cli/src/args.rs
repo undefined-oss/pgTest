@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, SocketAddr},
+    num::{NonZeroU16, NonZeroUsize},
     path::PathBuf,
 };
 
@@ -27,8 +28,8 @@ pub struct ServeOptions {
     #[bpaf(long, argument("HOST"), guard(|value| !value.is_empty(), "--pg-host cannot be empty"))]
     pub pg_host: String,
     /// Upstream PostgreSQL port (also used for its Unix socket filename).
-    #[bpaf(long, argument("PORT"), guard(positive_port, "--pg-port must be greater than zero"))]
-    pub pg_port: u16,
+    #[bpaf(long, argument("PORT"))]
+    pub pg_port: NonZeroU16,
     /// Upstream PostgreSQL user.
     #[bpaf(long, argument("USER"), guard(|value| !value.is_empty(), "--pg-user cannot be empty"))]
     pub pg_user: String,
@@ -45,29 +46,22 @@ pub struct ServeOptions {
     #[bpaf(long, argument("DIR"), complete_shell(ShellComp::Dir { mask: None }), optional)]
     pub unix_socket_dir: Option<PathBuf>,
     /// Unix socket filename port; defaults to 6432, independent of TCP.
-    #[bpaf(
-        long,
-        argument("PORT"),
-        guard(positive_port, "--unix-socket-port must be greater than zero"),
-        optional
-    )]
-    pub unix_socket_port: Option<u16>,
+    #[bpaf(long, argument("PORT"), optional)]
+    pub unix_socket_port: Option<NonZeroU16>,
     /// Maximum PostgreSQL connections used for database creation.
     #[bpaf(
         long,
         argument("COUNT"),
-        guard(positive_pool, "--creation-pool-connection must be greater than zero"),
-        fallback(10)
+        fallback(NonZeroUsize::new(10).unwrap())
     )]
-    pub creation_pool_connection: u32,
+    pub creation_pool_connection: NonZeroUsize,
     /// Maximum PostgreSQL connections used for database cleanup.
     #[bpaf(
         long,
         argument("COUNT"),
-        guard(positive_pool, "--cleanup-pool-connection must be greater than zero"),
-        fallback(5)
+        fallback(NonZeroUsize::new(5).unwrap())
     )]
-    pub cleanup_pool_connection: u32,
+    pub cleanup_pool_connection: NonZeroUsize,
     /// Initial number of ready test databases.
     #[bpaf(long, argument("COUNT"), fallback(16))]
     pub pool_initial_size: u16,
@@ -84,25 +78,12 @@ pub struct ServeOptions {
     #[bpaf(
         long,
         argument("COUNT"),
-        guard(positive_capacity, "--max-lease-records must be greater than zero"),
-        fallback(100000)
+        fallback(NonZeroUsize::new(100000).unwrap())
     )]
-    pub max_lease_records: usize,
+    pub max_lease_records: NonZeroUsize,
     /// Tracing filter; defaults to info. Does not read RUST_LOG.
     #[bpaf(long, argument("FILTER"), fallback(String::from("info")))]
     pub log_filter: String,
-}
-
-fn positive_port(value: &u16) -> bool {
-    *value > 0
-}
-
-fn positive_pool(value: &u32) -> bool {
-    *value > 0
-}
-
-fn positive_capacity(value: &usize) -> bool {
-    *value > 0
 }
 
 fn serve_options() -> impl Parser<ServeOptions> {
@@ -188,7 +169,7 @@ mod tests {
         assert_eq!(tcp.tcp_address().unwrap().port(), 0);
         let unix = parse(&["--unix-socket-dir", "/tmp", "--unix-socket-port", "7432"]).unwrap();
         assert!(unix.listen_addr.is_none());
-        assert_eq!(unix.unix_socket_port, Some(7432));
+        assert_eq!(unix.unix_socket_port.map(NonZeroU16::get), Some(7432));
         assert!(parse(&["--listen-addr", "127.0.0.1", "--unix-socket-dir", "/tmp"]).is_ok());
         assert!(parse(&["--listen-addr", "127.0.0.1", "--unix-socket-port", "7432"]).is_err());
         assert!(parse(&["--unix-socket-dir", "/tmp", "--listen-port", "7432"]).is_err());
@@ -212,18 +193,18 @@ mod tests {
         assert_eq!(options.tcp_address().unwrap().port(), 6432);
         let postgres = options.postgres_config();
         assert_eq!(postgres.pgtest_pg_host, "localhost");
-        assert_eq!(postgres.pgtest_pg_port, 5432);
+        assert_eq!(postgres.pgtest_pg_port.get(), 5432);
         assert_eq!(postgres.pgtest_pg_user, "postgres");
         assert_eq!(postgres.pgtest_pg_database, "template");
-        assert_eq!(postgres.pgtest_pg_creation_pool_connection, 10);
-        assert_eq!(postgres.pgtest_pg_cleanup_pool_connection, 5);
+        assert_eq!(postgres.pgtest_pg_creation_pool_connection.get(), 10);
+        assert_eq!(postgres.pgtest_pg_cleanup_pool_connection.get(), 5);
         let engine = options.engine_config();
         assert_eq!(engine.initial_slots, 16);
         assert_eq!(engine.starvation_threshold, 8);
         assert_eq!(engine.grow_batch_size, 16);
         assert_eq!(engine.lease_claim_timeout_ms, 30000);
-        assert_eq!(engine.max_lease_records, 100000);
-        assert_eq!(options.unix_socket_port.unwrap_or(6432), 6432);
+        assert_eq!(engine.max_lease_records.get(), 100000);
+        assert_eq!(options.unix_socket_port.map_or(6432, NonZeroU16::get), 6432);
         assert_eq!(options.log_filter, "info");
     }
 
@@ -251,14 +232,14 @@ mod tests {
         ])
         .unwrap();
         let postgres = options.postgres_config();
-        assert_eq!(postgres.pgtest_pg_creation_pool_connection, 2);
-        assert_eq!(postgres.pgtest_pg_cleanup_pool_connection, 3);
+        assert_eq!(postgres.pgtest_pg_creation_pool_connection.get(), 2);
+        assert_eq!(postgres.pgtest_pg_cleanup_pool_connection.get(), 3);
         let engine = options.engine_config();
         assert_eq!(engine.initial_slots, 4);
         assert_eq!(engine.starvation_threshold, 5);
         assert_eq!(engine.grow_batch_size, 0);
         assert_eq!(engine.lease_claim_timeout_ms, 60000);
-        assert_eq!(engine.max_lease_records, 7);
+        assert_eq!(engine.max_lease_records.get(), 7);
         assert_eq!(options.log_filter, "warn");
     }
 

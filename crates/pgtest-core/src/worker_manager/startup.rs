@@ -15,8 +15,6 @@ use crate::worker_engine::{core::WorkerEngineConfig, errors::PostgresDDLClientEr
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
-    #[error("lease record capacity must be greater than zero")]
-    InvalidLeaseRecordLimit,
     #[error("failed to initialize PostgreSQL: {0}")]
     Postgres(#[from] PostgresClientError),
     #[error("failed to create the initial databases: {0}")]

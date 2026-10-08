@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use pgtest_utils::read_string::ReadString;
 
 use crate::worker_engine::errors::PostgresDDLClientError;
@@ -8,12 +10,12 @@ pub struct DatabaseId(pub u64);
 #[derive(Debug, Clone, Copy)]
 pub struct CreateDatabases {
     pub first_database_id: DatabaseId,
-    pub amount: usize,
+    pub amount: NonZeroUsize,
 }
 
 impl CreateDatabases {
     pub fn database_id(&self, index: usize) -> DatabaseId {
-        assert!(index < self.amount, "creation index outside reserved batch");
+        assert!(index < self.amount.get(), "creation index outside reserved batch");
         DatabaseId(
             self.first_database_id
                 .0
