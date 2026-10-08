@@ -207,8 +207,8 @@ mod worker_engine_manager_test {
 
     fn no_growth_config(slots: u16) -> WorkerEngineConfig {
         WorkerEngineConfig {
-            initial_slots: slots,
-            grow_batch_size: 0,
+            initial_slots: slots.into(),
+            grow_batch_size: 0.into(),
             lease_claim_timeout_ms: 30_000,
             ..WorkerEngineConfig::default()
         }
@@ -268,9 +268,9 @@ mod worker_engine_manager_test {
 
     async fn start_with_deferred_workers() -> (WorkerEngineManager, DeferredWorkers) {
         let config = WorkerEngineConfig {
-            initial_slots: 1,
-            starvation_threshold: 0,
-            grow_batch_size: 1,
+            initial_slots: 1.into(),
+            starvation_threshold: 0.into(),
+            grow_batch_size: 1.into(),
             ..WorkerEngineConfig::default()
         };
         let pg_client = std::sync::Arc::new(
@@ -334,10 +334,10 @@ mod worker_engine_manager_test {
     async fn startup_prefills_a_large_batch_on_one_connection() {
         let manager = WorkerEngineManager::start(
             PostgresConfig {
-                pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN,
+                pgtest_pg_creation_pool_connection: std::num::NonZeroUsize::MIN.into(),
                 ..pg_container_config().await
             },
-            WorkerEngineConfig { initial_slots: 33, ..WorkerEngineConfig::default() },
+            WorkerEngineConfig { initial_slots: 33.into(), ..WorkerEngineConfig::default() },
         )
         .await
         .unwrap();
@@ -378,9 +378,9 @@ mod worker_engine_manager_test {
         let first_config = pg_container_config().await;
         let mut options = Config::new();
         options
-            .host(&first_config.pgtest_pg_host)
-            .port(first_config.pgtest_pg_port.get())
-            .user(&first_config.pgtest_pg_user)
+            .host(first_config.pgtest_pg_host.as_str())
+            .port(first_config.pgtest_pg_port.port())
+            .user(first_config.pgtest_pg_user.as_str())
             .password("postgres")
             .dbname("postgres");
         let first = WorkerEngineManager::start(first_config, no_growth_config(1)).await.unwrap();
@@ -454,11 +454,11 @@ mod worker_engine_manager_test {
         assert_eq!(snapshot.leases.len(), 1);
         assert_eq!(
             snapshot.inventory.ready().len(),
-            usize::from(WorkerEngineConfig::default().initial_slots - 1)
+            usize::from(*WorkerEngineConfig::default().initial_slots - 1)
         );
 
         let mut assigned_config = pg_container_config().await;
-        assigned_config.pgtest_pg_database = assigned_database;
+        assigned_config.pgtest_pg_database = assigned_database.parse().unwrap();
         assert!(
             pgtest_database_operations::manager::PostgresManager::start(assigned_config)
                 .await
@@ -495,7 +495,7 @@ mod worker_engine_manager_test {
         assert_eq!(snapshot.leases[&lease].conns, 1);
         assert_eq!(
             snapshot.inventory.ready().len(),
-            usize::from(WorkerEngineConfig::default().initial_slots - 1)
+            usize::from(*WorkerEngineConfig::default().initial_slots - 1)
         );
     }
 
@@ -514,8 +514,8 @@ mod worker_engine_manager_test {
     async fn when_attach_times_out_without_free_slots_then_the_consumer_stops_waiting_for_a_response()
      {
         let worker_engine_config = WorkerEngineConfig {
-            initial_slots: 0,
-            grow_batch_size: 0,
+            initial_slots: 0.into(),
+            grow_batch_size: 0.into(),
             lease_claim_timeout_ms: 100,
             ..WorkerEngineConfig::default()
         };

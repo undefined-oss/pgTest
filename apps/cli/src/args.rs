@@ -1,13 +1,19 @@
-use std::{
-    net::{IpAddr, SocketAddr},
-    num::{NonZeroU16, NonZeroUsize},
-    path::PathBuf,
-};
+use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 
 use anyhow::{Result, ensure};
 use bpaf::{Bpaf, Parser, ShellComp};
-use pgtest::worker_engine::core::WorkerEngineConfig;
-use pgtest_database_operations::manager::config::PostgresConfig;
+use pgtest::worker_engine::core::{
+    GrowBatchSize, InitialSlots, StarvationThreshold, WorkerEngineConfig,
+};
+use pgtest_database_operations::manager::config::{
+    CleanupPoolSize, CreationPoolSize, PostgresConfig, PostgresDatabase, PostgresHost,
+    PostgresUpstreamPort, PostgresUser,
+};
+use pgtest_pg_wire::{
+    listener_addr::ListenAddr,
+    listener_port::{SocketListenerPort, TCPListenerPort},
+    unix_socket_dir::UnixSocketDir,
+};
 
 /// Run pgtest against an existing PostgreSQL instance.
 #[derive(Clone, Debug, Bpaf)]
@@ -25,52 +31,45 @@ pub enum Command {
 #[bpaf(generate(parse_serve_options))]
 pub struct ServeOptions {
     /// Upstream hostname, IP address, or Unix socket directory.
-    #[bpaf(long, argument("HOST"), guard(|value| !value.is_empty(), "--pg-host cannot be empty"))]
-    pub pg_host: String,
-    /// Upstream PostgreSQL port (also used for its Unix socket filename).
-    #[bpaf(long, argument("PORT"))]
-    pub pg_port: NonZeroU16,
+    #[bpaf(long, argument("HOST"))]
+    pub pg_host: PostgresHost,
+    /// Upstream PostgreSQL port; defaults to 5432 (also used for its Unix
+    /// socket filename).
+    #[bpaf(long, argument("PORT"), fallback(PostgresUpstreamPort::default()))]
+    pub pg_port: PostgresUpstreamPort,
     /// Upstream PostgreSQL user.
-    #[bpaf(long, argument("USER"), guard(|value| !value.is_empty(), "--pg-user cannot be empty"))]
-    pub pg_user: String,
+    #[bpaf(long, argument("USER"))]
+    pub pg_user: PostgresUser,
     /// Existing PostgreSQL template database to clone for tests.
-    #[bpaf(long, argument("DATABASE"), guard(|value| !value.is_empty(), "--pg-database cannot be empty"))]
-    pub pg_database: String,
+    #[bpaf(long, argument("DATABASE"))]
+    pub pg_database: PostgresDatabase,
     /// Enable TCP on this IP address, e.g. 127.0.0.1 or ::1.
     #[bpaf(long, argument("IP"), optional)]
-    pub listen_addr: Option<IpAddr>,
+    pub listen_addr: Option<ListenAddr>,
     /// TCP port; defaults to 6432. Zero selects an available port.
     #[bpaf(long, argument("PORT"), optional)]
-    pub listen_port: Option<u16>,
+    pub listen_port: Option<TCPListenerPort>,
     /// Existing directory for the frontend Unix socket.
-    #[bpaf(long, argument("DIR"), complete_shell(ShellComp::Dir { mask: None }), optional)]
-    pub unix_socket_dir: Option<PathBuf>,
+    #[bpaf(long, argument::<PathBuf>("DIR"), complete_shell(ShellComp::Dir { mask: None }), map(UnixSocketDir::from), optional)]
+    pub unix_socket_dir: Option<UnixSocketDir>,
     /// Unix socket filename port; defaults to 6432, independent of TCP.
     #[bpaf(long, argument("PORT"), optional)]
-    pub unix_socket_port: Option<NonZeroU16>,
+    pub unix_socket_port: Option<SocketListenerPort>,
     /// Maximum PostgreSQL connections used for database creation.
-    #[bpaf(
-        long,
-        argument("COUNT"),
-        fallback(NonZeroUsize::new(10).unwrap())
-    )]
-    pub creation_pool_connection: NonZeroUsize,
+    #[bpaf(long, argument("COUNT"), fallback(CreationPoolSize::default()))]
+    pub creation_pool_connection: CreationPoolSize,
     /// Maximum PostgreSQL connections used for database cleanup.
-    #[bpaf(
-        long,
-        argument("COUNT"),
-        fallback(NonZeroUsize::new(5).unwrap())
-    )]
-    pub cleanup_pool_connection: NonZeroUsize,
+    #[bpaf(long, argument("COUNT"), fallback(CleanupPoolSize::default()))]
+    pub cleanup_pool_connection: CleanupPoolSize,
     /// Initial number of ready test databases.
-    #[bpaf(long, argument("COUNT"), fallback(16))]
-    pub pool_initial_size: u16,
+    #[bpaf(long, argument("COUNT"), fallback(InitialSlots::default()))]
+    pub pool_initial_size: InitialSlots,
     /// Ready database threshold that triggers replenishment.
-    #[bpaf(long, argument("COUNT"), fallback(8))]
-    pub pool_starvation_threshold: u16,
+    #[bpaf(long, argument("COUNT"), fallback(StarvationThreshold::default()))]
+    pub pool_starvation_threshold: StarvationThreshold,
     /// Number of databases per growth batch; zero disables growth.
-    #[bpaf(long, argument("COUNT"), fallback(16))]
-    pub pool_grow_batch_size: u16,
+    #[bpaf(long, argument("COUNT"), fallback(GrowBatchSize::default()))]
+    pub pool_grow_batch_size: GrowBatchSize,
     /// Maximum lease lifetime in milliseconds.
     #[bpaf(long, argument("MS"), fallback(30000))]
     pub lease_claim_timeout_ms: u64,
@@ -104,7 +103,9 @@ fn serve_options() -> impl Parser<ServeOptions> {
 
 impl ServeOptions {
     pub fn tcp_address(&self) -> Option<SocketAddr> {
-        self.listen_addr.map(|address| SocketAddr::new(address, self.listen_port.unwrap_or(6432)))
+        self.listen_addr.map(|address| {
+            SocketAddr::new(address.into(), self.listen_port.unwrap_or_default().get())
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -141,17 +142,8 @@ impl ServeOptions {
 mod tests {
     use super::*;
 
-    const UPSTREAM: &[&str] = &[
-        "serve",
-        "--pg-host",
-        "localhost",
-        "--pg-port",
-        "5432",
-        "--pg-user",
-        "postgres",
-        "--pg-database",
-        "template",
-    ];
+    const UPSTREAM: &[&str] =
+        &["serve", "--pg-host", "localhost", "--pg-user", "postgres", "--pg-database", "template"];
 
     fn parse(extra: &[&str]) -> Result<ServeOptions, bpaf::ParseFailure> {
         let args = [UPSTREAM, extra].concat();
@@ -169,7 +161,7 @@ mod tests {
         assert_eq!(tcp.tcp_address().unwrap().port(), 0);
         let unix = parse(&["--unix-socket-dir", "/tmp", "--unix-socket-port", "7432"]).unwrap();
         assert!(unix.listen_addr.is_none());
-        assert_eq!(unix.unix_socket_port.map(NonZeroU16::get), Some(7432));
+        assert_eq!(unix.unix_socket_port.map(|port| port.get()), Some(7432));
         assert!(parse(&["--listen-addr", "127.0.0.1", "--unix-socket-dir", "/tmp"]).is_ok());
         assert!(parse(&["--listen-addr", "127.0.0.1", "--unix-socket-port", "7432"]).is_err());
         assert!(parse(&["--unix-socket-dir", "/tmp", "--listen-port", "7432"]).is_err());
@@ -178,8 +170,8 @@ mod tests {
     }
 
     #[test]
-    fn each_upstream_value_is_required() {
-        for index in [1, 3, 5, 7] {
+    fn upstream_host_user_and_database_are_required() {
+        for index in [1, 3, 5] {
             let mut args = UPSTREAM.to_vec();
             args.drain(index..index + 2);
             args.extend(["--listen-addr", "127.0.0.1"]);
@@ -192,25 +184,27 @@ mod tests {
         let options = parse(&["--listen-addr", "127.0.0.1"]).unwrap();
         assert_eq!(options.tcp_address().unwrap().port(), 6432);
         let postgres = options.postgres_config();
-        assert_eq!(postgres.pgtest_pg_host, "localhost");
-        assert_eq!(postgres.pgtest_pg_port.get(), 5432);
-        assert_eq!(postgres.pgtest_pg_user, "postgres");
-        assert_eq!(postgres.pgtest_pg_database, "template");
+        assert_eq!(postgres.pgtest_pg_host.as_str(), "localhost");
+        assert_eq!(postgres.pgtest_pg_port.port(), 5432);
+        assert_eq!(postgres.pgtest_pg_user.as_str(), "postgres");
+        assert_eq!(postgres.pgtest_pg_database.as_str(), "template");
         assert_eq!(postgres.pgtest_pg_creation_pool_connection.get(), 10);
         assert_eq!(postgres.pgtest_pg_cleanup_pool_connection.get(), 5);
         let engine = options.engine_config();
-        assert_eq!(engine.initial_slots, 16);
-        assert_eq!(engine.starvation_threshold, 8);
-        assert_eq!(engine.grow_batch_size, 16);
+        assert_eq!(*engine.initial_slots, 16);
+        assert_eq!(*engine.starvation_threshold, 8);
+        assert_eq!(*engine.grow_batch_size, 16);
         assert_eq!(engine.lease_claim_timeout_ms, 30000);
         assert_eq!(engine.max_lease_records.get(), 100000);
-        assert_eq!(options.unix_socket_port.map_or(6432, NonZeroU16::get), 6432);
+        assert_eq!(options.unix_socket_port.unwrap_or_default().get(), 6432);
         assert_eq!(options.log_filter, "info");
     }
 
     #[test]
     fn overrides_reach_the_engine_and_postgres_configs() {
         let options = parse(&[
+            "--pg-port",
+            "55432",
             "--unix-socket-dir",
             "/tmp",
             "--creation-pool-connection",
@@ -232,12 +226,13 @@ mod tests {
         ])
         .unwrap();
         let postgres = options.postgres_config();
+        assert_eq!(postgres.pgtest_pg_port.port(), 55432);
         assert_eq!(postgres.pgtest_pg_creation_pool_connection.get(), 2);
         assert_eq!(postgres.pgtest_pg_cleanup_pool_connection.get(), 3);
         let engine = options.engine_config();
-        assert_eq!(engine.initial_slots, 4);
-        assert_eq!(engine.starvation_threshold, 5);
-        assert_eq!(engine.grow_batch_size, 0);
+        assert_eq!(*engine.initial_slots, 4);
+        assert_eq!(*engine.starvation_threshold, 5);
+        assert_eq!(*engine.grow_batch_size, 0);
         assert_eq!(engine.lease_claim_timeout_ms, 60000);
         assert_eq!(engine.max_lease_records.get(), 7);
         assert_eq!(options.log_filter, "warn");
@@ -246,6 +241,10 @@ mod tests {
     #[test]
     fn invalid_values_are_rejected() {
         for (flag, value) in [
+            ("--pg-port", "0"),
+            ("--pg-port", "65536"),
+            ("--pg-port", "-1"),
+            ("--pg-port", "invalid"),
             ("--creation-pool-connection", "0"),
             ("--cleanup-pool-connection", "0"),
             ("--max-lease-records", "0"),
@@ -262,7 +261,7 @@ mod tests {
         for port in ["65536", "-1", "invalid", ""] {
             assert!(parse(&["--listen-addr", "127.0.0.1", "--listen-port", port]).is_err());
         }
-        for (index, value) in [(2, ""), (4, "0"), (4, "65536"), (6, ""), (8, "")] {
+        for (index, value) in [(2, ""), (4, ""), (6, "")] {
             let mut args = UPSTREAM.to_vec();
             args[index] = value;
             args.extend(["--listen-addr", "127.0.0.1"]);
@@ -285,5 +284,19 @@ mod tests {
             let text = options().run_inner(args).unwrap_err().unwrap_stdout();
             assert!(!text.is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_directory_preserves_non_utf8_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let directory = PathBuf::from(OsString::from_vec(b"/tmp/socket-\xff".to_vec()));
+        let mut args: Vec<OsString> = UPSTREAM.iter().map(OsString::from).collect();
+        args.extend([OsString::from("--unix-socket-dir"), directory.clone().into_os_string()]);
+        let Command::Serve(options) = options().run_inner(args.as_slice()).unwrap() else {
+            panic!("expected serve command");
+        };
+        assert_eq!(options.unix_socket_dir.as_ref().unwrap().as_path(), directory.as_path());
     }
 }

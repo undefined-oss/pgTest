@@ -275,9 +275,9 @@ mod worker_engine_test {
             vec![attach("waiting", &consumer)],
             1,
             WorkerEngineConfig {
-                initial_slots: 0,
-                starvation_threshold: 0,
-                grow_batch_size: 1,
+                initial_slots: 0.into(),
+                starvation_threshold: 0.into(),
+                grow_batch_size: 1.into(),
                 ..WorkerEngineConfig::default()
             },
         )
@@ -399,9 +399,9 @@ mod grow_test {
     async fn grow_creates_a_full_batch() {
         let (worker, io) = run_grow_with(
             WorkerEngineConfig {
-                initial_slots: 1,
-                starvation_threshold: 2,
-                grow_batch_size: 2,
+                initial_slots: 1.into(),
+                starvation_threshold: 2.into(),
+                grow_batch_size: 2.into(),
                 ..WorkerEngineConfig::default()
             },
             vec![Ok(())],
@@ -419,9 +419,9 @@ mod grow_test {
     async fn growth_rounds_a_small_deficit_up_to_a_full_batch() {
         let (worker, io) = run_grow_with(
             WorkerEngineConfig {
-                initial_slots: 3,
-                starvation_threshold: 4,
-                grow_batch_size: 4,
+                initial_slots: 3.into(),
+                starvation_threshold: 4.into(),
+                grow_batch_size: 4.into(),
                 ..WorkerEngineConfig::default()
             },
             vec![Ok(())],
@@ -437,9 +437,9 @@ mod grow_test {
     async fn growth_is_unnecessary_when_ready_supply_exceeds_the_threshold() {
         let (worker, io) = run_grow_with(
             WorkerEngineConfig {
-                initial_slots: 4,
-                starvation_threshold: 3,
-                grow_batch_size: 4,
+                initial_slots: 4.into(),
+                starvation_threshold: 3.into(),
+                grow_batch_size: 4.into(),
                 ..WorkerEngineConfig::default()
             },
             vec![],

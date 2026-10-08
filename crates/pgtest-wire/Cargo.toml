@@ -13,6 +13,8 @@ name = "pgtest_pg_wire"
 workspace = true
 
 [dependencies]
+pgtest-utils = { version = "=0.1.0", path = "../pgtest-utils" }
+derive_more = { workspace = true, features = ["full"] }
 pest = "2.9.1"
 pest_derive = "2.9.1"
 async-trait = "0.1.92"

@@ -156,9 +156,9 @@ impl Fixture {
 #[tokio::test]
 async fn release_allows_new_attachments_while_cleanup_is_pending() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 1.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -226,9 +226,11 @@ async fn release_allows_new_attachments_while_cleanup_is_pending() {
 
 #[tokio::test]
 async fn releasing_an_unseen_id_does_not_allocate_a_database() {
-    let mut fixture =
-        Fixture::new(WorkerEngineConfig { initial_slots: 1, ..WorkerEngineConfig::default() })
-            .await;
+    let mut fixture = Fixture::new(WorkerEngineConfig {
+        initial_slots: 1.into(),
+        ..WorkerEngineConfig::default()
+    })
+    .await;
     let original = fixture.engine.inventory.ready()[0].clone();
     fixture.process(vec![fixture.release("late"), fixture.attach("late")]).await;
 
@@ -248,9 +250,9 @@ async fn releasing_an_unseen_id_does_not_allocate_a_database() {
 #[tokio::test]
 async fn release_fails_all_waiters_without_consuming_the_shared_creation() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -282,7 +284,7 @@ async fn release_fails_all_waiters_without_consuming_the_shared_creation() {
 #[tokio::test]
 async fn record_limit_reserves_room_for_closing_existing_leases() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
+        initial_slots: 1.into(),
         max_lease_records: std::num::NonZeroUsize::new(2).unwrap(),
         ..WorkerEngineConfig::default()
     })
@@ -320,9 +322,11 @@ async fn record_limit_reserves_room_for_closing_existing_leases() {
 
 #[tokio::test]
 async fn lost_release_reply_does_not_undo_closure_or_cleanup() {
-    let mut fixture =
-        Fixture::new(WorkerEngineConfig { initial_slots: 1, ..WorkerEngineConfig::default() })
-            .await;
+    let mut fixture = Fixture::new(WorkerEngineConfig {
+        initial_slots: 1.into(),
+        ..WorkerEngineConfig::default()
+    })
+    .await;
     fixture.process(vec![fixture.attach("test")]).await;
     let old = fixture.engine.leases["test"].clone();
     assert!(!old.cancellation.is_cancelled());
@@ -352,9 +356,9 @@ async fn lost_release_reply_does_not_undo_closure_or_cleanup() {
 #[tokio::test]
 async fn old_generation_events_and_cleanup_cannot_retire_a_reused_lease_id() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 1.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -425,7 +429,7 @@ async fn duplicate_expiry_schedules_cleanup_only_once() {
 #[tokio::test]
 async fn last_disconnect_keeps_the_database_for_reconnect() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
+        initial_slots: 1.into(),
         lease_claim_timeout_ms: 0,
         ..WorkerEngineConfig::default()
     })
@@ -457,9 +461,9 @@ async fn last_disconnect_keeps_the_database_for_reconnect() {
 #[tokio::test]
 async fn startup_does_not_prefill_beyond_initial_size() {
     let fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 8,
-        grow_batch_size: 4,
+        initial_slots: 1.into(),
+        starvation_threshold: 8.into(),
+        grow_batch_size: 4.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -472,9 +476,9 @@ async fn startup_does_not_prefill_beyond_initial_size() {
 #[tokio::test]
 async fn covered_burst_does_not_schedule_redundant_batches() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 0,
-        grow_batch_size: 4,
+        initial_slots: 1.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 4.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -492,9 +496,9 @@ async fn covered_burst_does_not_schedule_redundant_batches() {
 #[tokio::test]
 async fn excess_demand_grows_in_full_batches_before_any_completion() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 0,
-        grow_batch_size: 4,
+        initial_slots: 1.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 4.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -511,9 +515,9 @@ async fn excess_demand_grows_in_full_batches_before_any_completion() {
 #[tokio::test]
 async fn connections_for_one_lease_share_demand_and_one_completion() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 4,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 4.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -533,9 +537,9 @@ async fn connections_for_one_lease_share_demand_and_one_completion() {
 #[tokio::test]
 async fn one_creation_serves_only_one_distinct_waiting_lease() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -557,9 +561,9 @@ async fn one_creation_serves_only_one_distinct_waiting_lease() {
 #[tokio::test]
 async fn settled_success_is_not_counted_as_both_ready_and_pending() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 2,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 2.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -580,9 +584,9 @@ async fn settled_success_is_not_counted_as_both_ready_and_pending() {
 #[tokio::test]
 async fn failed_creation_keeps_waiter_and_replenishes_without_reusing_failed_ids() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -615,9 +619,9 @@ fn creation_failure() -> PostgresDDLClientError {
 #[tokio::test]
 async fn retiring_databases_do_not_count_as_supply_for_waiters() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 2,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 2.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -647,9 +651,9 @@ async fn retiring_databases_do_not_count_as_supply_for_waiters() {
 #[tokio::test]
 async fn expired_and_undeliverable_groups_do_not_block_live_groups() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 1.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -682,9 +686,9 @@ async fn expired_and_undeliverable_groups_do_not_block_live_groups() {
 #[tokio::test]
 async fn expired_groups_do_not_inflate_growth_demand() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -707,9 +711,9 @@ async fn expired_groups_do_not_inflate_growth_demand() {
 #[tokio::test]
 async fn failed_creation_submission_releases_reservation_without_retrying_inline() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -739,9 +743,9 @@ async fn failed_creation_submission_releases_reservation_without_retrying_inline
 #[tokio::test]
 async fn repeated_submission_failure_does_not_loop_or_accumulate_reservations() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -766,9 +770,9 @@ async fn repeated_submission_failure_does_not_loop_or_accumulate_reservations() 
 #[tokio::test]
 async fn unknown_creation_completion_cannot_supply_a_database() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -785,9 +789,9 @@ async fn unknown_creation_completion_cannot_supply_a_database() {
 #[tokio::test]
 async fn duplicate_creation_completions_cannot_restore_an_assigned_database() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 1,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -816,8 +820,8 @@ async fn duplicate_creation_completions_cannot_restore_an_assigned_database() {
 #[tokio::test]
 async fn cleanup_completions_cannot_remove_ready_or_assigned_databases() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 1,
-        grow_batch_size: 0,
+        initial_slots: 1.into(),
+        grow_batch_size: 0.into(),
         ..WorkerEngineConfig::default()
     })
     .await;
@@ -842,9 +846,9 @@ async fn cleanup_completions_cannot_remove_ready_or_assigned_databases() {
 async fn cleanup_failure_retains_database_identity_without_blocking_creation() {
     for submission_fails in [false, true] {
         let mut fixture = Fixture::new(WorkerEngineConfig {
-            initial_slots: 1,
-            starvation_threshold: 0,
-            grow_batch_size: 1,
+            initial_slots: 1.into(),
+            starvation_threshold: 0.into(),
+            grow_batch_size: 1.into(),
             ..WorkerEngineConfig::default()
         })
         .await;
@@ -885,9 +889,9 @@ async fn cleanup_failure_retains_database_identity_without_blocking_creation() {
 #[tokio::test]
 async fn zero_batch_size_disables_growth() {
     let mut fixture = Fixture::new(WorkerEngineConfig {
-        initial_slots: 0,
-        starvation_threshold: 0,
-        grow_batch_size: 0,
+        initial_slots: 0.into(),
+        starvation_threshold: 0.into(),
+        grow_batch_size: 0.into(),
         ..WorkerEngineConfig::default()
     })
     .await;

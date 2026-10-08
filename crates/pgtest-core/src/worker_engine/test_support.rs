@@ -181,7 +181,7 @@ impl PostgresConnection {
     pub(super) fn start(postgres_config: PostgresConfig) -> Self {
         Self {
             template_database_name: SequentialDatabaseNames::new(
-                postgres_config.pgtest_pg_database,
+                postgres_config.pgtest_pg_database.into(),
             ),
         }
     }
@@ -379,9 +379,9 @@ pub type GrowWorker =
 
 pub fn grow_config() -> WorkerEngineConfig {
     WorkerEngineConfig {
-        initial_slots: 1,
-        starvation_threshold: 1,
-        grow_batch_size: 1,
+        initial_slots: 1.into(),
+        starvation_threshold: 1.into(),
+        grow_batch_size: 1.into(),
         ..WorkerEngineConfig::default()
     }
 }
