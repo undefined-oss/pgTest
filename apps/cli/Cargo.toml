@@ -1,6 +1,6 @@
 [package]
 name = "cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
@@ -23,13 +23,13 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 mimalloc = "0.1.52"
 hotpath = { workspace = true }
-pgtest-core = { version = "=0.1.0", path = "../../crates/pgtest-core" }
-pgtest-wire = { version = "=0.1.0", path = "../../crates/pgtest-wire" }
-pgtest-database-operations = { version = "=0.1.0", path = "../../crates/pgtest-database-operations" }
+pgtest-core = { version = "=0.2.0", path = "../../crates/pgtest-core" }
+pgtest-wire = { version = "=0.2.0", path = "../../crates/pgtest-wire" }
+pgtest-database-operations = { version = "=0.2.0", path = "../../crates/pgtest-database-operations" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["process"] }
-pgtest-database-operations = { version = "=0.1.0", path = "../../crates/pgtest-database-operations", features = ["test-support"] }
+pgtest-database-operations = { version = "=0.2.0", path = "../../crates/pgtest-database-operations", features = ["test-support"] }
 tokio-postgres = "0.7.18"
 tempfile = "3"
 
