@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use pgtest::worker_manager::worker_io::LeaseSession;
+use pgtest::manager_handle::LeaseSession;
 use pgwire::tokio::server::MaybeTls;
 use tokio::io::{AsyncWriteExt, copy_bidirectional_with_sizes};
 

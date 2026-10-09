@@ -27,6 +27,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 hotpath = { workspace = true }
 pgtest-core = { version = "=0.1.0", path = "../pgtest-core"}
+pgtest-engine-backend = { version = "=0.1.0", path = "../pgtest-engine-backend" }
 
 [dev-dependencies]
 pgtest-core = { version = "=0.1.0", path = "../pgtest-core", features = ["test-support"] }

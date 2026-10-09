@@ -1,8 +1,14 @@
+#[cfg(feature = "tokio-runtime")]
+use std::sync::Arc;
 use std::{borrow::Borrow, fmt, ops::Deref};
 
+#[cfg(feature = "tokio-runtime")]
+use pgtest_engine_backend::{PgTarget, jobs::DatabaseId};
 use pgtest_utils::read_string::ReadString;
+#[cfg(feature = "tokio-runtime")]
+use tokio_util::sync::CancellationToken;
 
-use super::errors::InvalidLeaseId;
+use super::{database_inventory::Database, errors::InvalidLeaseId};
 
 /// A validated lease identifier, preserving its original UTF-8 value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -44,6 +50,31 @@ impl fmt::Display for LeaseId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LeaseKey {
+    pub lease: LeaseId,
+    pub generation: u64,
+}
+
+#[cfg(feature = "tokio-runtime")]
+pub struct LeaseSession {
+    pub database_id: DatabaseId,
+    pub target: Arc<PgTarget>,
+    pub(crate) cancellation: CancellationToken,
+}
+#[cfg(feature = "tokio-runtime")]
+impl LeaseSession {
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LeaseEntry {
+    pub database: Database,
+    pub generation: u64,
 }
 
 #[cfg(test)]

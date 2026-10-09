@@ -10,13 +10,13 @@ publish = false
 workspace = true
 
 [dependencies]
+pgtest-engine-backend = { path = "../pgtest-engine-backend" }
 derive_more = { workspace = true, features = ["full"] }
 hotpath = { workspace = true }
 tokio-postgres = "0.7.18"
 deadpool-postgres = "0.14.2"
 futures-util = "0.3.34"
 rand = "0.10.2"
-rustc-hash = "2.1.3"
 tokio-util = { version = "0.7.19", features = ["rt"] }
 envconfig = { workspace = true }
 thiserror = { workspace = true }

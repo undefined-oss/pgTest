@@ -70,12 +70,11 @@ the owned Unix socket; startup never overwrites an existing file or socket.
 | `--pool-starvation-threshold` | `8` |
 | `--pool-grow-batch-size` | `16` |
 | `--lease-claim-timeout-ms` | `30000` |
-| `--max-lease-records` | `100000` |
 | `--log-filter` | `info` |
 
 For example, append `--pool-initial-size 32 --creation-pool-connection 8
 --log-filter debug` to a `serve` command. Zero growth batch size disables growth.
-Pool connection counts and maximum lease records must be greater than zero.
+Pool connection counts must be greater than zero.
 
 Profiling is off by default. Build with `--features hotpath` to enable it;
 `hotpath-alloc` and `hotpath-prometheus` are also available alongside `hotpath`.

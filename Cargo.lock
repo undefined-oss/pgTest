@@ -1848,15 +1848,13 @@ version = "0.1.0"
 dependencies = [
  "derive_more",
  "envconfig",
- "futures-util",
  "hotpath",
  "pgtest-database-operations",
+ "pgtest-engine-backend",
  "pgtest-utils",
- "rand 0.10.2",
  "rustc-hash",
  "thiserror",
  "tokio",
- "tokio-postgres",
  "tokio-util",
  "tracing",
 ]
@@ -1870,9 +1868,9 @@ dependencies = [
  "envconfig",
  "futures-util",
  "hotpath",
+ "pgtest-engine-backend",
  "pgtest-utils",
  "rand 0.10.2",
- "rustc-hash",
  "serde_json",
  "tempfile",
  "testcontainers",
@@ -1882,6 +1880,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pgtest-engine-backend"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
@@ -1905,6 +1910,7 @@ dependencies = [
  "pest_derive",
  "pgtest-core",
  "pgtest-database-operations",
+ "pgtest-engine-backend",
  "pgtest-utils",
  "pgwire",
  "testcontainers",

@@ -8,11 +8,9 @@ pub struct InvalidLeaseId;
 pub enum ReleaseError {
     #[error("lease ID must contain 1 to 256 UTF-8 bytes and cannot contain '/' or NUL")]
     InvalidLeaseId,
-    #[error("the lease record limit has been reached")]
-    LeaseRecordLimitReached,
     #[error("the worker engine is unavailable")]
     EngineUnavailable,
-    #[error("release acknowledgement timed out; retrying the same lease ID is safe")]
+    #[error("release acknowledgement timed out")]
     ReplyTimedOut,
     #[error("the worker engine returned an unexpected release reply")]
     UnexpectedReply,
@@ -22,12 +20,8 @@ pub enum ReleaseError {
 pub enum AttachError {
     #[error("invalid lease ID")]
     InvalidLeaseId,
-    #[error("the lease record limit has been reached")]
-    LeaseRecordLimitReached,
     #[error("the lease has been released")]
     LeaseClosed,
-    #[error("database does not match the configured template")]
-    TemplateMismatch,
     #[error("the worker engine is unavailable")]
     EngineUnavailable,
     #[error("timed out waiting for a database")]
@@ -46,18 +40,4 @@ pub enum IOError {
 pub enum ConsumerIOError {
     #[error("failed to reply to the consumer; its reply channel is gone")]
     FailedToReplyTheConsumer,
-}
-
-#[derive(Error, Debug)]
-pub enum PostgresDDLClientError {
-    #[error("{0}")]
-    OperationFailed(String),
-}
-
-impl From<pgtest_database_operations::manager::errors::PostgresOperationsError>
-    for PostgresDDLClientError
-{
-    fn from(error: pgtest_database_operations::manager::errors::PostgresOperationsError) -> Self {
-        Self::OperationFailed(error.to_string())
-    }
 }

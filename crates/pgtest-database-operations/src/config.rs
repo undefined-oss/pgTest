@@ -91,7 +91,7 @@ impl Default for CleanupPoolSize {
     }
 }
 
-#[derive(Envconfig, Debug)]
+#[derive(Envconfig, Debug, Clone)]
 pub struct PostgresConfig {
     #[envconfig(from = "PGTEST_PG_HOST", default = "127.0.0.1")]
     pub pgtest_pg_host: PostgresHost,

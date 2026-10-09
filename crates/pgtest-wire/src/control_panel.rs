@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use pgtest::{worker_engine::core::LeaseId, worker_manager::WorkerEngineManager};
+use pgtest::manager_handle::{LeaseId, ManagerHandle};
 use pgwire::{
     api::{
         PgWireServerHandlers,
@@ -25,7 +25,7 @@ pub use statement::{LeaseArgument, PgTestQueryTypeControlStatement};
 pub(crate) async fn serve(
     mut framed: ClientConnection,
     startup: Startup,
-    manager: Arc<WorkerEngineManager>,
+    manager: Arc<ManagerHandle>,
 ) -> std::io::Result<()> {
     let handlers = Arc::new(PgTestControlPanel::new(manager));
     let startup_handler = handlers.startup_handler();
@@ -69,11 +69,11 @@ pub(crate) async fn serve(
 
 #[derive(Clone)]
 pub struct PgTestControlPanel {
-    manager: Arc<WorkerEngineManager>,
+    manager: Arc<ManagerHandle>,
 }
 
 impl PgTestControlPanel {
-    pub fn new(manager: Arc<WorkerEngineManager>) -> Self {
+    pub fn new(manager: Arc<ManagerHandle>) -> Self {
         Self { manager }
     }
 

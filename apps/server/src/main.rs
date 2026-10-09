@@ -6,8 +6,8 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use envconfig::Envconfig;
-use pgtest::{worker_engine::core::WorkerEngineConfig, worker_manager::WorkerEngineManager};
-use pgtest_database_operations::manager::config::PostgresConfig;
+use pgtest::{config::ManagerConfig, runtime::TokioRuntime};
+use pgtest_database_operations::config::PostgresConfig;
 use pgtest_pg_wire::{
     listener_addr::ListenAddr,
     listener_port::{SocketListenerPort, TCPListenerPort},
@@ -50,28 +50,30 @@ async fn main() -> Result<()> {
 
     let postgres_config =
         PostgresConfig::init_from_env().context("invalid PostgreSQL configuration")?;
-    let worker_engine_config =
-        WorkerEngineConfig::init_from_env().context("invalid worker engine configuration")?;
+    let manager_config =
+        ManagerConfig::init_from_env().context("invalid worker engine configuration")?;
 
-    let engine = Arc::new(
-        WorkerEngineManager::start(postgres_config, worker_engine_config)
-            .await
-            .context("failed to start worker engine manager")?,
-    );
-    let address = wire_listener::run(
+    let template = postgres_config.pgtest_pg_database.clone();
+    let runtime = TokioRuntime::start(postgres_config, manager_config)
+        .await
+        .context("failed to start worker engine manager")?;
+    let engine = Arc::new(runtime.handle());
+    let tcp_listener = wire_listener::run_with_handle(
         engine.clone(),
         SocketAddr::new(server_config.listen_addr.into(), server_config.listen_port.get()),
+        &template,
     )
     .await
     .context("failed to start wire listener")?;
-    tracing::info!(%address, "pgtest server listening");
+    tracing::info!(address = %tcp_listener.local_addr(), "pgtest server listening");
 
     #[cfg(unix)]
     let unix_listener = if let Some(directory) = &server_config.unix_socket_dir {
         let listener = wire_listener::run_unix_on_port(
-            engine,
+            engine.clone(),
             directory,
             server_config.unix_socket_port.get(),
+            &template,
         )
         .await
         .context("failed to start Unix wire listener")?;
@@ -81,12 +83,17 @@ async fn main() -> Result<()> {
         None
     };
 
-    tokio::signal::ctrl_c().await.context("failed to wait for Ctrl-C")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.context("failed to wait for Ctrl-C")?,
+        _ = engine.stopped() => {},
+    }
     tracing::info!("Stopping pgtest server");
     #[cfg(unix)]
     if let Some(listener) = unix_listener {
         listener.shutdown().await;
     }
+    tcp_listener.shutdown().await;
+    runtime.shutdown().await;
     Ok(())
 }
 

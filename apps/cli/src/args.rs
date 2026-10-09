@@ -1,11 +1,9 @@
-use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Result, ensure};
 use bpaf::{Bpaf, Parser, ShellComp};
-use pgtest::worker_engine::core::{
-    GrowBatchSize, InitialSlots, StarvationThreshold, WorkerEngineConfig,
-};
-use pgtest_database_operations::manager::config::{
+use pgtest::config::{GrowBatchSize, InitialSlots, ManagerConfig, StarvationThreshold};
+use pgtest_database_operations::config::{
     CleanupPoolSize, CreationPoolSize, PostgresConfig, PostgresDatabase, PostgresHost,
     PostgresUpstreamPort, PostgresUser,
 };
@@ -72,14 +70,7 @@ pub struct ServeOptions {
     pub pool_grow_batch_size: GrowBatchSize,
     /// Maximum lease lifetime in milliseconds.
     #[bpaf(long, argument("MS"), fallback(30000))]
-    pub lease_claim_timeout_ms: u64,
-    /// Maximum admitted lease IDs, including closed IDs.
-    #[bpaf(
-        long,
-        argument("COUNT"),
-        fallback(NonZeroUsize::new(100000).unwrap())
-    )]
-    pub max_lease_records: NonZeroUsize,
+    pub lease_claim_timeout_ms: u128,
     /// Tracing filter; defaults to info. Does not read RUST_LOG.
     #[bpaf(long, argument("FILTER"), fallback(String::from("info")))]
     pub log_filter: String,
@@ -127,13 +118,12 @@ impl ServeOptions {
         }
     }
 
-    pub fn engine_config(&self) -> WorkerEngineConfig {
-        WorkerEngineConfig {
+    pub fn manager_config(&self) -> ManagerConfig {
+        ManagerConfig {
             initial_slots: self.pool_initial_size,
             starvation_threshold: self.pool_starvation_threshold,
             grow_batch_size: self.pool_grow_batch_size,
             lease_claim_timeout_ms: self.lease_claim_timeout_ms,
-            max_lease_records: self.max_lease_records,
         }
     }
 }
@@ -190,12 +180,11 @@ mod tests {
         assert_eq!(postgres.pgtest_pg_database.as_str(), "template");
         assert_eq!(postgres.pgtest_pg_creation_pool_connection.get(), 10);
         assert_eq!(postgres.pgtest_pg_cleanup_pool_connection.get(), 5);
-        let engine = options.engine_config();
+        let engine = options.manager_config();
         assert_eq!(*engine.initial_slots, 16);
         assert_eq!(*engine.starvation_threshold, 8);
         assert_eq!(*engine.grow_batch_size, 16);
         assert_eq!(engine.lease_claim_timeout_ms, 30000);
-        assert_eq!(engine.max_lease_records.get(), 100000);
         assert_eq!(options.unix_socket_port.unwrap_or_default().get(), 6432);
         assert_eq!(options.log_filter, "info");
     }
@@ -219,8 +208,6 @@ mod tests {
             "0",
             "--lease-claim-timeout-ms",
             "60000",
-            "--max-lease-records",
-            "7",
             "--log-filter",
             "warn",
         ])
@@ -229,12 +216,11 @@ mod tests {
         assert_eq!(postgres.pgtest_pg_port.port(), 55432);
         assert_eq!(postgres.pgtest_pg_creation_pool_connection.get(), 2);
         assert_eq!(postgres.pgtest_pg_cleanup_pool_connection.get(), 3);
-        let engine = options.engine_config();
+        let engine = options.manager_config();
         assert_eq!(*engine.initial_slots, 4);
         assert_eq!(*engine.starvation_threshold, 5);
         assert_eq!(*engine.grow_batch_size, 0);
         assert_eq!(engine.lease_claim_timeout_ms, 60000);
-        assert_eq!(engine.max_lease_records.get(), 7);
         assert_eq!(options.log_filter, "warn");
     }
 
@@ -247,7 +233,6 @@ mod tests {
             ("--pg-port", "invalid"),
             ("--creation-pool-connection", "0"),
             ("--cleanup-pool-connection", "0"),
-            ("--max-lease-records", "0"),
             ("--pool-initial-size", "65536"),
             ("--pool-grow-batch-size", "-1"),
             ("--unix-socket-port", "0"),

@@ -15,27 +15,22 @@ workspace = true
 
 [dependencies]
 derive_more = { workspace = true, features = ["full"] }
-hotpath = { workspace = true }
-rand = "0.10.2"
-rustc-hash = "2.1.3"
-tokio-util = { version = "0.7.19", features = ["rt"] }
 envconfig = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
-pgtest-utils = { version = "=0.1.0", path = "../pgtest-utils"}
-pgtest-database-operations = { version = "=0.1.0", path = "../pgtest-database-operations"}
-
-[dev-dependencies]
-tokio-postgres = "0.7.18"
-futures-util = "0.3.34"
-tokio = { workspace = true, features = ["test-util"] }
-pgtest-database-operations = { version = "=0.1.0", path = "../pgtest-database-operations", features = ["test-support"]}
+rustc-hash = "2.1.3"
+pgtest-utils = { path = "../pgtest-utils" }
+pgtest-engine-backend = { path = "../pgtest-engine-backend" }
+hotpath = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { version = "0.7.19", features = ["rt"], optional = true }
+pgtest-database-operations = { path = "../pgtest-database-operations", optional = true }
 
 [features]
-default = []
-hotpath = ["hotpath/hotpath", "pgtest-database-operations/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "pgtest-database-operations/hotpath-alloc"]
-hotpath-prometheus = ["hotpath", "hotpath/hotpath-prometheus", "pgtest-database-operations/hotpath-prometheus"]
-# Expose configuration defaults to other crates' tests.
+default = ["tokio-runtime"]
+tokio-runtime = ["dep:pgtest-database-operations", "dep:tokio", "dep:tokio-util", "dep:hotpath"]
 test-support = []
+runtime-tests = ["tokio-runtime", "test-support", "tokio/test-util", "pgtest-database-operations/test-support"]
+hotpath = ["tokio-runtime", "hotpath/hotpath", "pgtest-database-operations/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+hotpath-prometheus = ["hotpath", "hotpath/hotpath-prometheus"]

@@ -35,9 +35,9 @@ tempfile = "3"
 
 [features]
 default = []
-hotpath = ["hotpath/hotpath", "pgtest-core/hotpath", "pgtest-wire/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "pgtest-core/hotpath-alloc", "pgtest-wire/hotpath-alloc"]
-hotpath-prometheus = ["hotpath", "hotpath/hotpath-prometheus", "pgtest-core/hotpath-prometheus", "pgtest-wire/hotpath-prometheus"]
+hotpath = ["pgtest-database-operations/hotpath", "hotpath/hotpath", "pgtest-core/hotpath", "pgtest-wire/hotpath"]
+hotpath-alloc = ["pgtest-database-operations/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc", "pgtest-core/hotpath-alloc", "pgtest-wire/hotpath-alloc"]
+hotpath-prometheus = ["pgtest-database-operations/hotpath-prometheus", "hotpath", "hotpath/hotpath-prometheus", "pgtest-core/hotpath-prometheus", "pgtest-wire/hotpath-prometheus"]
 
 [package.metadata.dist]
 dist = true
