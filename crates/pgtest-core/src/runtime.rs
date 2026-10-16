@@ -1,6 +1,7 @@
 //! Initialization and shutdown ownership for the three Tokio actors.
 use std::{collections::HashMap, time::Duration};
 
+use hotpath::wrap::tokio::sync::mpsc::UnboundedReceiver;
 use pgtest_database_operations::{
     backend::{BootstrapError, PreparedPostgres},
     cleanup_worker_handle::CleanupHandle,
@@ -9,7 +10,6 @@ use pgtest_database_operations::{
     errors::PostgresClientError,
 };
 use pgtest_engine_backend::{BackendError, jobs::DatabaseWorkerMessages};
-use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
@@ -72,10 +72,12 @@ impl TokioRuntime {
         runtime.start_manager(creation, cleanup, manager_config, inbox).await
     }
 
-    fn new(config: &ManagerConfig) -> (Self, mpsc::UnboundedReceiver<TokioMessage>) {
+    fn new(config: &ManagerConfig) -> (Self, UnboundedReceiver<TokioMessage>) {
         let shutdown = CancellationToken::new();
-        let (commands, inbox) = mpsc::unbounded_channel();
+        let (commands, inbox) =
+            hotpath::channel!(tokio::sync::mpsc::unbounded_channel(), label = "manager");
         let manager = ManagerHandle {
+            leases: Default::default(),
             commands,
             epoch: tokio::time::Instant::now(),
             claim_timeout: Duration::from_nanos_u128(
@@ -94,7 +96,7 @@ impl TokioRuntime {
         creation: CreationHandle,
         cleanup: CleanupHandle,
         config: ManagerConfig,
-        mut inbox: mpsc::UnboundedReceiver<TokioMessage>,
+        mut inbox: UnboundedReceiver<TokioMessage>,
     ) -> Result<Self, StartError> {
         let inventory = match Self::create_initial(&creation, &mut inbox, config).await {
             Ok(inventory) => inventory,
@@ -105,6 +107,7 @@ impl TokioRuntime {
         };
         let epoch = self.manager.epoch;
         let ports = TokioPorts {
+            leases: self.manager.leases.clone(),
             creation,
             cleanup,
             cancellations: HashMap::new(),
@@ -113,14 +116,15 @@ impl TokioRuntime {
             shutdown: self.shutdown.clone(),
             tracker: self.tracker.clone(),
         };
-        let manager = ManagerWorker::new(config, inventory, ports);
+        let mut manager = ManagerWorker::new(config, inventory, ports);
+        manager.leases = self.manager.leases.clone();
         tokio::spawn(self.tracker.track_future(manager.run(inbox, epoch)));
         Ok(self)
     }
 
     async fn create_initial(
         creation: &CreationHandle,
-        inbox: &mut mpsc::UnboundedReceiver<TokioMessage>,
+        inbox: &mut UnboundedReceiver<TokioMessage>,
         config: ManagerConfig,
     ) -> Result<DatabaseInventory, StartError> {
         let mut inventory = DatabaseInventory::default();
@@ -130,15 +134,17 @@ impl TokioRuntime {
         while !inventory.creating().is_empty() {
             let message = inbox.recv().await.ok_or(StartError::RuntimeStopped)?;
             // The manager handle is not exposed until this batch completes.
-            let ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationFinished {
-                database_id,
-                result,
+            let ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+                results,
             }) = message
             else {
                 unreachable!("only creation results can arrive during startup");
             };
-            if let Some(result) = inventory.complete_creation(database_id, result) {
-                result?;
+            for result in results {
+                if let Some(result) = inventory.complete_creation(result.database_id, result.result)
+                {
+                    result?;
+                }
             }
         }
         Ok(inventory)
@@ -169,8 +175,11 @@ impl Drop for TokioRuntime {
 #[cfg(all(test, feature = "runtime-tests"))]
 mod tests {
     use std::{
+        future::Future,
         num::NonZeroUsize,
+        pin::Pin,
         sync::{Arc, Mutex},
+        task::{Context, Poll, Waker},
         time::Duration,
     };
 
@@ -303,9 +312,12 @@ mod tests {
         let (runtime, _, mut drops) = start(1).await;
         let manager = runtime.handle();
         let session = manager.attach(LeaseId::new("held").unwrap()).await.unwrap();
+        let joined = manager.attach(LeaseId::new("held").unwrap()).await.unwrap();
         tokio::time::advance(Duration::from_secs(30)).await;
         next(&mut drops).await.1.send(Ok(())).unwrap();
         assert!(session.cancellation_token().is_cancelled());
+        assert!(joined.cancellation_token().is_cancelled());
+        assert!(!manager.leases.pin().contains_key("held"));
         let pending = manager.attach(LeaseId::new("waiting").unwrap());
         assert!(matches!(pending.await, Err(AttachError::TimedOut)));
         runtime.shutdown().await;
@@ -365,18 +377,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_failure_cancels_remaining_creation_without_waiting_for_results() {
+    async fn startup_failure_waits_for_the_full_creation_batch() {
         let (backend, mut creates, _) = backend();
-        let task = tokio::spawn(start_runtime(backend, config(2, 0)));
+        let task = tokio::spawn(start_runtime(backend, config(3, 0)));
         let first = next(&mut creates).await;
         let pending = next(&mut creates).await;
         first.send(Err(BackendError::OperationFailed("creation failed".into()))).unwrap();
+        let third = next(&mut creates).await;
+        assert!(!task.is_finished(), "the first failure must not report a partial batch");
+        third.send(Ok(db("third"))).unwrap();
+        pending.send(Ok(db("second"))).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(3), task)
             .await
-            .expect("startup failure must not wait for the remaining creation")
+            .expect("startup must finish after all batch outcomes arrive")
             .unwrap();
         assert!(matches!(result, Err(StartError::InitialDatabaseCreation(_))));
-        assert!(pending.is_closed());
     }
 
     #[tokio::test]
@@ -400,6 +415,7 @@ mod tests {
             Err(AttachError::TimedOut)
         ));
         next(&mut creates).await.send(Ok(db("available"))).unwrap();
+        next(&mut creates).await.send(Ok(db("spare"))).unwrap();
         let session = handle.attach(LeaseId::new("live").unwrap()).await.unwrap();
         assert_eq!(session.target.database, "available");
         runtime.shutdown().await;
@@ -438,6 +454,7 @@ mod tests {
         let creation = next(&mut creates).await;
         tokio::time::advance(Duration::from_millis(11)).await;
         creation.send(Ok(db("available"))).unwrap();
+        next(&mut creates).await.send(Ok(db("spare"))).unwrap();
         assert!(matches!(
             response.await.unwrap(),
             Reply::Engine(ConsumerReply::AttachRejected(AttachError::TimedOut))
@@ -535,6 +552,250 @@ mod tests {
             runtime.shutdown.clone(),
         );
         runtime.start_manager(creation, cleanup, config.engine, inbox).await
+    }
+
+    // Drive the real Tokio adapter synchronously, leaving the inbox undrained
+    // until the test explicitly handles a message.
+    fn manual_manager(
+        initial: u16,
+        timeout_ms: u128,
+    ) -> (TokioRuntime, ManagerWorker<TokioPorts>, UnboundedReceiver<TokioMessage>) {
+        let mut cfg = config(initial, 0).engine;
+        cfg.lease_claim_timeout_ms = timeout_ms;
+        let (runtime, inbox) = TokioRuntime::new(&cfg);
+        let backend = Arc::new(ImmediateBackend { sequence: Mutex::new(0) });
+        let ports = TokioPorts {
+            leases: runtime.manager.leases.clone(),
+            creation: CreationHandle::new_with_client(
+                backend.clone(),
+                NonZeroUsize::new(1).unwrap(),
+                runtime.manager.commands.clone(),
+                runtime.tracker.clone(),
+                runtime.shutdown.clone(),
+            ),
+            cleanup: CleanupHandle::new_with_client(
+                backend,
+                NonZeroUsize::new(1).unwrap(),
+                runtime.manager.commands.clone(),
+                runtime.tracker.clone(),
+                runtime.shutdown.clone(),
+            ),
+            cancellations: HashMap::new(),
+            commands: runtime.manager.commands.clone(),
+            epoch: runtime.manager.epoch,
+            shutdown: runtime.shutdown.clone(),
+            tracker: runtime.tracker.clone(),
+        };
+        let mut inventory = DatabaseInventory::default();
+        if let Some(batch) = inventory.reserve_creations(usize::from(initial)) {
+            for index in 0..batch.amount.get() {
+                inventory
+                    .complete_creation(batch.database_id(index), Ok(db(&format!("db{index}"))))
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+        let mut worker = ManagerWorker::new(cfg, inventory, ports);
+        worker.leases = runtime.manager.leases.clone();
+        (runtime, worker, inbox)
+    }
+
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn published_attaches_bypass_inbox_and_queued_attaches_still_join() {
+        for timeout_ms in [0, 30_000] {
+            let (runtime, mut worker, mut inbox) = manual_manager(2, timeout_ms);
+            let handle = runtime.handle();
+            let lease = LeaseId::new("shared").unwrap();
+            let first = handle.attach(lease.clone());
+            let queued = handle.attach(lease.clone());
+            tokio::pin!(first, queued);
+            assert!(poll_once(first.as_mut()).is_pending());
+            assert!(poll_once(queued.as_mut()).is_pending());
+            assert_eq!(inbox.len(), 2);
+            worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+            let Poll::Ready(Ok(first)) = poll_once(first.as_mut()) else {
+                panic!("first attach must finish")
+            };
+            assert!(poll_once(queued.as_mut()).is_pending());
+
+            // Publication must allow reads even with an earlier miss queued.
+            for _ in 0..100 {
+                let direct = handle.attach(lease.clone());
+                tokio::pin!(direct);
+                let Poll::Ready(Ok(direct)) = poll_once(direct.as_mut()) else {
+                    panic!("published attach must not wait for the worker")
+                };
+                assert_eq!(direct.database_id, first.database_id);
+                assert!(Arc::ptr_eq(&direct.target, &first.target));
+            }
+            assert_eq!(inbox.len(), 1);
+            worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+            let Poll::Ready(Ok(queued)) = poll_once(queued.as_mut()) else {
+                panic!("queued attach must join")
+            };
+            assert_eq!(queued.database_id, first.database_id);
+            assert_eq!(worker.inventory.ready().len(), 1);
+
+            let release = handle.release(lease.clone());
+            tokio::pin!(release);
+            assert!(poll_once(release.as_mut()).is_pending());
+            let direct = handle.attach(lease.clone());
+            tokio::pin!(direct);
+            let Poll::Ready(Ok(direct)) = poll_once(direct.as_mut()) else {
+                panic!("queued release must not block a direct join")
+            };
+            assert_eq!(inbox.len(), 1);
+            worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+            assert!(matches!(poll_once(release.as_mut()), Poll::Ready(Ok(()))));
+            for session in [&first, &queued, &direct] {
+                assert!(session.cancellation_token().is_cancelled());
+            }
+
+            let fresh = handle.attach(lease);
+            tokio::pin!(fresh);
+            assert!(poll_once(fresh.as_mut()).is_pending());
+            worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+            let Poll::Ready(Ok(fresh)) = poll_once(fresh.as_mut()) else {
+                panic!("released lease must get a fresh assignment")
+            };
+            assert_ne!(fresh.database_id, first.database_id);
+            assert!(!fresh.cancellation_token().is_cancelled());
+            assert!(inbox.is_empty());
+            runtime.shutdown().await;
+            assert!(fresh.cancellation_token().is_cancelled());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_first_reply_is_not_published_and_unread_success_is_published() {
+        let (runtime, mut worker, mut inbox) = manual_manager(1, 0);
+        let handle = runtime.handle();
+        let lease = LeaseId::new("shared").unwrap();
+        let (reply, response) = oneshot::channel();
+        drop(response);
+        worker.handle(
+            ManagerMessage::AttachOrJoin {
+                lease: lease.clone(),
+                reply,
+                message_time: ElapsedTime::default(),
+            },
+            ElapsedTime::default(),
+        );
+        assert!(handle.leases.is_empty());
+        assert_eq!(worker.inventory.ready().len(), 1);
+
+        let (reply, response) = oneshot::channel();
+        worker.handle(
+            ManagerMessage::AttachOrJoin {
+                lease: lease.clone(),
+                reply,
+                message_time: ElapsedTime::default(),
+            },
+            ElapsedTime::default(),
+        );
+        // A delivered reply owns the assignment even if nobody reads it.
+        drop(response);
+        let direct = handle.attach(lease);
+        tokio::pin!(direct);
+        let Poll::Ready(Ok(direct)) = poll_once(direct.as_mut()) else {
+            panic!("successful unread reply must publish")
+        };
+        assert_eq!(direct.database_id, DatabaseId(1));
+        assert!(inbox.try_recv().is_err());
+        assert!(worker.inventory.ready().is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_readers_share_published_session_without_worker_progress() {
+        let (runtime, mut worker, inbox) = manual_manager(1, 0);
+        let handle = runtime.handle();
+        let lease = LeaseId::new("shared").unwrap();
+        let (reply, response) = oneshot::channel();
+        worker.handle(
+            ManagerMessage::AttachOrJoin {
+                lease: lease.clone(),
+                reply,
+                message_time: ElapsedTime::default(),
+            },
+            ElapsedTime::default(),
+        );
+        let Reply::Attached(first) = response.await.unwrap() else { panic!("expected attachment") };
+        let mut readers = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let handle = handle.clone();
+            let lease = lease.clone();
+            readers.spawn(async move { handle.attach(lease).await.unwrap() });
+        }
+        let sessions =
+            tokio::time::timeout(Duration::from_secs(3), readers.join_all()).await.unwrap();
+        assert!(inbox.is_empty());
+        worker.shutdown();
+        for session in sessions {
+            assert_eq!(session.database_id, first.database_id);
+            assert!(Arc::ptr_eq(&session.target, &first.target));
+            assert!(session.cancellation_token().is_cancelled());
+        }
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unpublished_assignment_uses_message_path() {
+        use crate::manager_handle::lease::LeaseEntry;
+
+        let (runtime, mut worker, mut inbox) = manual_manager(1, 0);
+        let handle = runtime.handle();
+        let lease = LeaseId::new("shared").unwrap();
+        // Model the interval between assignment and the first successful reply.
+        let database = worker.inventory.take_ready().unwrap();
+        handle.leases.pin().insert(
+            lease.clone(),
+            LeaseEntry { database, generation: 1, session: Default::default() },
+        );
+        let pending = handle.attach(lease);
+        tokio::pin!(pending);
+        assert!(poll_once(pending.as_mut()).is_pending());
+        assert_eq!(inbox.len(), 1);
+        worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+        assert!(matches!(poll_once(pending.as_mut()), Poll::Ready(Ok(_))));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn direct_attach_checks_cancellation_shutdown_and_channel_closure() {
+        for closed_channel in [false, true] {
+            let (runtime, mut worker, mut inbox) = manual_manager(1, 0);
+            let handle = runtime.handle();
+            let lease = LeaseId::new("shared").unwrap();
+            let (reply, response) = oneshot::channel();
+            worker.handle(
+                ManagerMessage::AttachOrJoin {
+                    lease: lease.clone(),
+                    reply,
+                    message_time: ElapsedTime::default(),
+                },
+                ElapsedTime::default(),
+            );
+            drop(response);
+            if closed_channel {
+                inbox.close();
+            } else {
+                worker.shutdown();
+                assert!(matches!(
+                    handle.attach(lease.clone()).await,
+                    Err(AttachError::LeaseClosed)
+                ));
+                assert!(inbox.is_empty());
+                runtime.shutdown.cancel();
+            }
+            assert!(matches!(handle.attach(lease).await, Err(AttachError::EngineUnavailable)));
+            assert!(inbox.is_empty());
+            runtime.shutdown().await;
+        }
     }
 
     #[tokio::test]

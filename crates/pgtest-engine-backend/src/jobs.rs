@@ -30,7 +30,20 @@ pub struct CleanupDatabase {
 }
 
 #[derive(Clone, Debug)]
+pub struct CreationResult {
+    pub database_id: DatabaseId,
+    pub result: Result<ProvisionedDatabase, BackendError>,
+}
+
+#[derive(Clone, Debug)]
 pub enum DatabaseWorkerMessages {
-    CreationFinished { database_id: DatabaseId, result: Result<ProvisionedDatabase, BackendError> },
-    CleanupFinished { database_id: DatabaseId, result: Result<(), BackendError> },
+    /// All outcomes for one completed CreateDatabases request, in completion
+    /// order.
+    CreationsFinished {
+        results: Vec<CreationResult>,
+    },
+    CleanupFinished {
+        database_id: DatabaseId,
+        result: Result<(), BackendError>,
+    },
 }

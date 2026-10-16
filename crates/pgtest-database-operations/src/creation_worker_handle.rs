@@ -7,12 +7,12 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 pub use creation_pg_client::CreationClient;
 use creation_worker::CreationActor;
+use hotpath::wrap::tokio::sync::mpsc;
 use pgtest_engine_backend::{
     DatabaseCreator, WorkerUnavailable,
     jobs::{CreateDatabases, DatabaseWorkerMessages},
     workers::CreationState,
 };
-use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{backend::PostgresMetadata, config::PostgresConfig, errors::PostgresClientError};
@@ -49,7 +49,8 @@ impl CreationHandle {
         tracker: TaskTracker,
         shutdown: CancellationToken,
     ) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) =
+            hotpath::channel!(tokio::sync::mpsc::unbounded_channel(), label = "creation");
         let actor =
             CreationActor { client, state: CreationState::new(limit), receiver, manager, shutdown };
         tokio::spawn(tracker.track_future(async move { actor.run().await }));
@@ -89,7 +90,7 @@ mod tests {
         config.pgtest_pg_creation_pool_connection = std::num::NonZeroUsize::MIN.into();
         let metadata = bootstrap(&config).await.unwrap();
         let (events, mut receiver) =
-            tokio::sync::mpsc::unbounded_channel::<DatabaseWorkerMessages>();
+            hotpath::channel!(tokio::sync::mpsc::unbounded_channel::<DatabaseWorkerMessages>());
         let shutdown = CancellationToken::new();
         let tracker = TaskTracker::new();
         let handle =
@@ -102,22 +103,23 @@ mod tests {
                 amount: std::num::NonZeroUsize::new(2).unwrap(),
             })
             .unwrap();
-        for id in [7, 8] {
+        let mut ids = Vec::new();
+        while ids.len() < 2 {
             let result = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
                 .await
                 .unwrap()
                 .unwrap();
             match result {
-                pgtest_engine_backend::jobs::DatabaseWorkerMessages::CreationFinished {
-                    database_id,
-                    result,
-                } => {
-                    assert_eq!(database_id, DatabaseId(id));
-                    result.unwrap();
+                DatabaseWorkerMessages::CreationsFinished { results } => {
+                    for result in results {
+                        ids.push(result.database_id);
+                        result.result.unwrap();
+                    }
                 }
                 _ => panic!("unexpected deletion"),
             }
         }
+        assert_eq!(ids, [DatabaseId(7), DatabaseId(8)]);
         shutdown.cancel();
         tracker.close();
         tracker.wait().await;

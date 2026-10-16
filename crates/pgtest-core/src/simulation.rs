@@ -331,19 +331,22 @@ impl SimRuntime {
                 if self.startup_result.is_none() {
                     // Consume initial results in the runtime before dispatching
                     // to Manager.
-                    let ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationFinished {
-                        database_id,
-                        result,
+                    let ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+                        results,
                     }) = message
                     else {
                         panic!("only creation results can arrive during startup");
                     };
-                    if let Some(Err(error)) =
-                        self.manager.inventory.complete_creation(database_id, result)
-                    {
-                        self.startup_result = Some(Err(error));
-                        self.stop();
-                        return StepResult::Stopped;
+                    for result in results {
+                        if let Some(Err(error)) = self
+                            .manager
+                            .inventory
+                            .complete_creation(result.database_id, result.result)
+                        {
+                            self.startup_result = Some(Err(error));
+                            self.stop();
+                            return StepResult::Stopped;
+                        }
                     }
                     if self.manager.inventory.creating().is_empty() {
                         self.startup_result = Some(Ok(()));
@@ -366,8 +369,10 @@ impl SimRuntime {
                             self.active_creation.insert(id.0, id);
                             self.shared.borrow_mut().trace.push(format!("begin create {id:?}"));
                         }
-                        CreationAction::Report(event) => {
-                            self.inject(ManagerMessage::DatabaseWorker(event))
+                        CreationAction::Report(results) => {
+                            self.inject(ManagerMessage::DatabaseWorker(
+                                DatabaseWorkerMessages::CreationsFinished { results },
+                            ))
                         }
                     }
                 }
