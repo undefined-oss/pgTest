@@ -6,22 +6,29 @@ use std::{
 
 use crate::{
     BackendError, ProvisionedDatabase,
-    jobs::{CleanupDatabase, CreateDatabases, DatabaseId, DatabaseWorkerMessages},
+    jobs::{CleanupDatabase, CreateDatabases, CreationResult, DatabaseId, DatabaseWorkerMessages},
 };
 
 pub enum CreationAction {
     Begin(DatabaseId),
-    Report(DatabaseWorkerMessages),
+    Report(Vec<CreationResult>),
 }
 pub struct CreationState {
     queued: VecDeque<CreateDatabases>,
     current: Option<(CreateDatabases, usize)>,
     active: HashSet<DatabaseId>,
+    completed: Vec<CreationResult>,
     limit: usize,
 }
 impl CreationState {
     pub fn new(limit: NonZeroUsize) -> Self {
-        Self { queued: VecDeque::new(), current: None, active: HashSet::new(), limit: limit.get() }
+        Self {
+            queued: VecDeque::new(),
+            current: None,
+            active: HashSet::new(),
+            completed: Vec::new(),
+            limit: limit.get(),
+        }
     }
 
     pub fn enqueue(&mut self, request: CreateDatabases) -> Vec<CreationAction> {
@@ -37,12 +44,8 @@ impl CreationState {
         if !self.active.remove(&id) {
             return Vec::new();
         }
-        let mut actions = vec![CreationAction::Report(DatabaseWorkerMessages::CreationFinished {
-            database_id: id,
-            result,
-        })];
-        actions.extend(self.fill());
-        actions
+        self.completed.push(CreationResult { database_id: id, result });
+        self.fill()
     }
 
     fn fill(&mut self) -> Vec<CreationAction> {
@@ -52,6 +55,10 @@ impl CreationState {
                 if !self.active.is_empty() {
                     break;
                 }
+                // Publish exactly once for the complete CreateDatabases
+                // request, including failures, before starting
+                // the next queued batch.
+                actions.push(CreationAction::Report(std::mem::take(&mut self.completed)));
                 self.current = None;
             }
             if self.current.is_none() {
@@ -79,6 +86,7 @@ impl CreationState {
         self.queued.clear();
         self.current = None;
         self.active.clear();
+        self.completed.clear();
     }
 }
 
@@ -136,5 +144,79 @@ impl CleanupState {
     pub fn stop(&mut self) {
         self.queued.clear();
         self.active.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(first: u64, amount: usize) -> CreateDatabases {
+        CreateDatabases {
+            first_database_id: DatabaseId(first),
+            amount: NonZeroUsize::new(amount).unwrap(),
+        }
+    }
+
+    fn failed() -> Result<ProvisionedDatabase, BackendError> {
+        Err(BackendError::OperationFailed("injected failure".into()))
+    }
+
+    #[test]
+    fn creation_reports_once_per_request_after_all_results_and_before_next_batch() {
+        let mut state = CreationState::new(NonZeroUsize::new(2).unwrap());
+        assert!(matches!(
+            state.enqueue(request(1, 3)).as_slice(),
+            [CreationAction::Begin(DatabaseId(1)), CreationAction::Begin(DatabaseId(2)),]
+        ));
+        assert!(state.enqueue(request(4, 2)).is_empty());
+        assert!(matches!(
+            state.complete(DatabaseId(2), failed()).as_slice(),
+            [CreationAction::Begin(DatabaseId(3)),]
+        ));
+        assert!(state.complete(DatabaseId(2), failed()).is_empty());
+        assert!(state.complete(DatabaseId(999), failed()).is_empty());
+        assert!(state.complete(DatabaseId(3), failed()).is_empty());
+        let actions = state.complete(DatabaseId(1), failed());
+        let [
+            CreationAction::Report(results),
+            CreationAction::Begin(DatabaseId(4)),
+            CreationAction::Begin(DatabaseId(5)),
+        ] = actions.as_slice()
+        else {
+            panic!("must report the completed batch before starting the next one")
+        };
+        assert_eq!(
+            results.iter().map(|result| result.database_id).collect::<Vec<_>>(),
+            [DatabaseId(2), DatabaseId(3), DatabaseId(1)]
+        );
+        assert!(results.iter().all(|result| result.result.is_err()));
+        assert!(state.complete(DatabaseId(4), failed()).is_empty());
+        let actions = state.complete(DatabaseId(5), failed());
+        let [CreationAction::Report(results)] = actions.as_slice() else {
+            panic!("must report exactly the second batch")
+        };
+        assert_eq!(
+            results.iter().map(|result| result.database_id).collect::<Vec<_>>(),
+            [DatabaseId(4), DatabaseId(5)]
+        );
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn stopping_discards_partial_batch_results() {
+        let mut state = CreationState::new(NonZeroUsize::new(2).unwrap());
+        state.enqueue(request(1, 2));
+        assert!(state.complete(DatabaseId(1), failed()).is_empty());
+        state.stop();
+        assert!(state.is_idle());
+        assert!(state.complete(DatabaseId(2), failed()).is_empty());
+        state.enqueue(request(3, 1));
+        let actions = state.complete(DatabaseId(3), failed());
+        let [CreationAction::Report(results)] = actions.as_slice() else {
+            panic!("must report only the new batch")
+        };
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].database_id, DatabaseId(3));
     }
 }

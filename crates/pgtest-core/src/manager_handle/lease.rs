@@ -1,6 +1,6 @@
 #[cfg(feature = "tokio-runtime")]
-use std::sync::Arc;
-use std::{borrow::Borrow, fmt, ops::Deref};
+use std::sync::OnceLock;
+use std::{borrow::Borrow, fmt, ops::Deref, sync::Arc};
 
 #[cfg(feature = "tokio-runtime")]
 use pgtest_engine_backend::{PgTarget, jobs::DatabaseId};
@@ -9,6 +9,8 @@ use pgtest_utils::read_string::ReadString;
 use tokio_util::sync::CancellationToken;
 
 use super::{database_inventory::Database, errors::InvalidLeaseId};
+
+pub(crate) type SharedLeases = Arc<papaya::HashMap<LeaseId, LeaseEntry, rustc_hash::FxBuildHasher>>;
 
 /// A validated lease identifier, preserving its original UTF-8 value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +61,7 @@ pub struct LeaseKey {
 }
 
 #[cfg(feature = "tokio-runtime")]
+#[derive(Clone, Debug)]
 pub struct LeaseSession {
     pub database_id: DatabaseId,
     pub target: Arc<PgTarget>,
@@ -75,6 +78,10 @@ impl LeaseSession {
 pub struct LeaseEntry {
     pub database: Database,
     pub generation: u64,
+    /// Published only after a successful reply, when rollback can no longer
+    /// return this assignment to the ready pool.
+    #[cfg(feature = "tokio-runtime")]
+    pub(crate) session: OnceLock<LeaseSession>,
 }
 
 #[cfg(test)]

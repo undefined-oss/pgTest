@@ -3,13 +3,15 @@
 
 use std::{collections::VecDeque, time::Duration};
 
-use pgtest_engine_backend::jobs::{CleanupDatabase, CreateDatabases, DatabaseWorkerMessages};
+use pgtest_engine_backend::jobs::{
+    CleanupDatabase, CreateDatabases, CreationResult, DatabaseWorkerMessages,
+};
 use rustc_hash::FxHashMap;
 
 use super::{
     database_inventory::{Database, DatabaseInventory},
     errors::{AttachError, IOError},
-    lease::{LeaseEntry, LeaseId, LeaseKey},
+    lease::{LeaseEntry, LeaseId, LeaseKey, SharedLeases},
     messages::{ConsumerReply, ElapsedTime, ManagerMessage},
 };
 use crate::config::ManagerConfig;
@@ -36,7 +38,7 @@ pub trait ManagerIO {
 }
 
 pub struct ManagerWorker<IO: ManagerIO> {
-    pub(crate) leases: FxHashMap<LeaseId, LeaseEntry>,
+    pub(crate) leases: SharedLeases,
     next_generation: u64,
     config: ManagerConfig,
     pub(crate) waiters: VecDeque<LeaseId>,
@@ -49,7 +51,7 @@ pub struct ManagerWorker<IO: ManagerIO> {
 impl<IO: ManagerIO> ManagerWorker<IO> {
     pub fn new(config: ManagerConfig, inventory: DatabaseInventory, io: IO) -> Self {
         Self {
-            leases: FxHashMap::default(),
+            leases: SharedLeases::default(),
             next_generation: 0,
             config,
             waiters: VecDeque::new(),
@@ -61,8 +63,8 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn leases(&self) -> &FxHashMap<LeaseId, LeaseEntry> {
-        &self.leases
+    pub fn leases(&self) -> FxHashMap<LeaseId, LeaseEntry> {
+        self.leases.pin().iter().map(|(lease, entry)| (lease.clone(), entry.clone())).collect()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -71,7 +73,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
     }
 
     pub fn shutdown(&mut self) {
-        for (lease, entry) in &self.leases {
+        for (lease, entry) in self.leases.pin().iter() {
             self.io
                 .cancel_sessions(&LeaseKey { lease: lease.clone(), generation: entry.generation });
         }
@@ -97,7 +99,8 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
                 let _ = self.io.reply(reply, ConsumerReply::ReleaseResult(Ok(())));
             }
             ManagerMessage::LeaseMaxTimeReached { lease, generation } => {
-                if self.leases.get(&lease).is_some_and(|entry| entry.generation == generation) {
+                let current = self.leases.pin().get(&lease).map(|entry| entry.generation);
+                if current == Some(generation) {
                     self.retire_lease(&lease);
                 }
             }
@@ -113,17 +116,8 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
     #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn handle_database_worker_message(&mut self, message: DatabaseWorkerMessages) {
         match message {
-            DatabaseWorkerMessages::CreationFinished { database_id, result } => {
-                let Some(result) = self.inventory.complete_creation(database_id, result) else {
-                    tracing::warn!(?database_id, "creation result without a pending reservation");
-                    return;
-                };
-                if let Err(error) = result {
-                    tracing::error!(?database_id, %error, "database creation failed");
-                }
-
-                self.dispatch_waiters();
-                self.grow();
+            DatabaseWorkerMessages::CreationsFinished { results } => {
+                self.handle_creation_results(results);
             }
             DatabaseWorkerMessages::CleanupFinished { database_id, result } => {
                 let Some(result) = self.inventory.complete_cleanup(database_id, result) else {
@@ -138,14 +132,39 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
         }
     }
 
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
+    fn handle_creation_results(&mut self, results: Vec<CreationResult>) {
+        if self.settle_creation_results(results) {
+            self.dispatch_waiters();
+            self.grow();
+        }
+    }
+
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
+    fn settle_creation_results(&mut self, results: Vec<CreationResult>) -> bool {
+        let mut settled = false;
+        for result in results {
+            let database_id = result.database_id;
+            let Some(result) = self.inventory.complete_creation(database_id, result.result) else {
+                tracing::warn!(?database_id, "creation result without a pending reservation");
+                continue;
+            };
+            settled = true;
+            if let Err(error) = result {
+                tracing::error!(?database_id, %error, "database creation failed");
+            }
+        }
+        settled
+    }
+
     fn attach_or_join(
         &mut self,
         lease: LeaseId,
         reply: IO::ReplyHandle,
         message_time: ElapsedTime,
     ) {
-        if let Some(entry) = self.leases.get(&lease) {
-            let database = entry.database.clone();
+        let database = self.leases.pin().get(&lease).map(|entry| entry.database.clone());
+        if let Some(database) = database {
             self.reply_attached(&lease, database, reply);
             return;
         }
@@ -179,7 +198,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
                 continue;
             };
 
-            let mut claimed = self.leases.contains_key(&lease);
+            let mut claimed = self.leases.pin().contains_key(&lease);
 
             for (reply, message_time) in replies {
                 if self.config.lease_claim_timeout_ms > 0
@@ -191,8 +210,9 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
                     continue;
                 }
 
-                let database = match self.leases.get(&lease) {
-                    Some(entry) => entry.database.clone(),
+                let database = self.leases.pin().get(&lease).map(|entry| entry.database.clone());
+                let database = match database {
+                    Some(database) => database,
                     None => {
                         let database = self
                             .inventory
@@ -218,21 +238,22 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
         database: Database,
         reply: IO::ReplyHandle,
     ) -> bool {
-        let entry = self.leases.get(lease).expect("reply requires an assigned lease");
+        let generation =
+            self.leases.pin().get(lease).expect("reply requires an assigned lease").generation;
         self.io
             .reply(
                 reply,
                 ConsumerReply::Attached {
                     database_id: database.database_id,
                     target: std::sync::Arc::new(database.resource.target),
-                    key: LeaseKey { lease: lease.clone(), generation: entry.generation },
+                    key: LeaseKey { lease: lease.clone(), generation },
                 },
             )
             .is_ok()
     }
 
     fn restore_unclaimed_database(&mut self, lease: &LeaseId) {
-        let Some(entry) = self.leases.remove(lease) else {
+        let Some(entry) = self.leases.pin().remove(lease).cloned() else {
             return;
         };
         self.io.cancel_sessions(&LeaseKey { lease: lease.clone(), generation: entry.generation });
@@ -241,7 +262,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
 
     #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn assign_database(&mut self, lease: &LeaseId, database: Database) -> Database {
-        debug_assert!(!self.leases.contains_key(lease));
+        debug_assert!(!self.leases.pin().contains_key(lease));
 
         let assigned = database.clone();
 
@@ -249,7 +270,15 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
             self.next_generation.checked_add(1).expect("lease generation exhausted");
 
         let generation = self.next_generation;
-        self.leases.insert(lease.clone(), LeaseEntry { database, generation });
+        self.leases.pin().insert(
+            lease.clone(),
+            LeaseEntry {
+                database,
+                generation,
+                #[cfg(feature = "tokio-runtime")]
+                session: std::sync::OnceLock::new(),
+            },
+        );
         if self.config.lease_claim_timeout_ms > 0 {
             self.io.schedule(
                 LeaseKey { lease: lease.clone(), generation },
@@ -269,6 +298,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
         assigned
     }
 
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     pub(crate) fn grow(&mut self) {
         let batch_size = usize::from(*self.config.grow_batch_size);
         if batch_size == 0 {
@@ -279,7 +309,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
             .group_waiters
             .iter()
             .filter(|(lease, replies)| {
-                !self.leases.contains_key(*lease)
+                !self.leases.pin().contains_key(*lease)
                     && replies.iter().any(|(_, queued_at)| {
                         self.config.lease_claim_timeout_ms == 0
                             || self.now.elapsed_since(*queued_at).as_millis()
@@ -310,7 +340,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
 
     #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn retire_lease(&mut self, lease: &LeaseId) {
-        let Some(entry) = self.leases.remove(lease) else {
+        let Some(entry) = self.leases.pin().remove(lease).cloned() else {
             return;
         };
 
@@ -339,15 +369,17 @@ pub(crate) use tokio_io::TokioPorts;
 mod tokio_io {
     use std::collections::HashMap;
 
+    use hotpath::wrap::tokio::sync::mpsc;
     use pgtest_database_operations::{
         cleanup_worker_handle::CleanupHandle, creation_worker_handle::CreationHandle,
     };
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     use super::*;
     use crate::manager_handle::{LeaseSession, Reply, TokioMessage};
     pub(crate) struct TokioPorts {
+        pub(crate) leases: SharedLeases,
         pub(crate) creation: CreationHandle,
         pub(crate) cleanup: CleanupHandle,
         pub(crate) cancellations: HashMap<LeaseKey, CancellationToken>,
@@ -372,22 +404,32 @@ mod tokio_io {
             sender: Self::ReplyHandle,
             reply: ConsumerReply,
         ) -> Result<(), ConsumerReply> {
-            let message = match &reply {
+            match &reply {
                 ConsumerReply::Attached { database_id, target, key } => {
                     let cancellation = self
                         .cancellations
                         .entry(key.clone())
                         .or_insert_with(|| self.shutdown.child_token())
                         .clone();
-                    Reply::Attached(LeaseSession {
+                    let session = LeaseSession {
                         database_id: *database_id,
                         target: target.clone(),
                         cancellation,
-                    })
+                    };
+                    if sender.send(Reply::Attached(session.clone())).is_err() {
+                        return Err(reply);
+                    }
+                    // The worker is the only assignment writer. Publish after
+                    // delivery succeeds so readers cannot claim a database
+                    // that a failed first reply would return to the ready pool.
+                    let leases = self.leases.pin();
+                    let entry = leases.get(&key.lease).expect("reply requires an assigned lease");
+                    debug_assert_eq!(entry.generation, key.generation);
+                    let _ = entry.session.set(session);
+                    Ok(())
                 }
-                _ => Reply::Engine(reply.clone()),
-            };
-            sender.send(message).map_err(|_| reply)
+                _ => sender.send(Reply::Engine(reply.clone())).map_err(|_| reply),
+            }
         }
 
         fn schedule(&mut self, key: LeaseKey, deadline: ElapsedTime, message: TokioMessage) {

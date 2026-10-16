@@ -4,7 +4,7 @@ use std::{num::NonZeroUsize, time::Duration};
 
 use pgtest_engine_backend::{
     BackendError, PgEndpoint, PgTarget, ProvisionedDatabase, ResourceId,
-    jobs::{DatabaseId, DatabaseWorkerMessages},
+    jobs::{CreationResult, DatabaseId, DatabaseWorkerMessages},
 };
 
 use super::{
@@ -232,6 +232,8 @@ fn connections_for_one_lease_share_demand_and_completion() {
     let id = r.active_creations()[0];
     r.complete_creation(id, Ok(db(id)));
     pump(&mut r);
+    assert!(requests.iter().all(|request| matches!(r.reply(*request), ReplySlot::Pending)));
+    finish_creations(&mut r);
     for request in requests {
         assert_eq!(attached(&r, request).0, id);
     }
@@ -244,6 +246,9 @@ fn one_creation_serves_only_one_distinct_waiting_lease() {
     pump(&mut r);
     let id = r.active_creations()[0];
     r.complete_creation(id, Ok(db(id)));
+    for pending in r.active_creations() {
+        r.complete_creation(pending, Err(failure()));
+    }
     pump(&mut r);
     attached(&r, a);
     assert!(matches!(r.reply(b), ReplySlot::Pending));
@@ -301,7 +306,7 @@ fn cancelled_shared_waiter_preserves_assignment_for_all_live_replies() {
         r.cancel_request(requests[cancelled_index]);
         let database_id = r.active_creations()[0];
         r.complete_creation(database_id, Ok(db(database_id)));
-        pump(&mut r);
+        finish_creations(&mut r);
 
         let live: Vec<_> = requests
             .into_iter()
@@ -343,15 +348,73 @@ fn expired_waiters_do_not_consume_supply() {
     ));
 }
 #[test]
+fn grouped_creation_results_skip_invalid_ids_and_dispatch_all_ready_supply() {
+    let mut r = ready(config(0, 0, 4));
+    let a = r.attach("a");
+    let b = r.attach("b");
+    pump(&mut r);
+    assert_eq!(r.snapshot().inventory.creating().len(), 4);
+    r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+        results: vec![
+            CreationResult { database_id: DatabaseId(999), result: Ok(db(DatabaseId(999))) },
+            CreationResult { database_id: DatabaseId(2), result: Err(failure()) },
+            CreationResult { database_id: DatabaseId(3), result: Ok(db(DatabaseId(3))) },
+            CreationResult { database_id: DatabaseId(3), result: Ok(db(DatabaseId(3))) },
+            CreationResult { database_id: DatabaseId(1), result: Ok(db(DatabaseId(1))) },
+            CreationResult { database_id: DatabaseId(4), result: Ok(db(DatabaseId(4))) },
+        ],
+    }));
+    r.step(ActorId::Manager);
+    assert_eq!(attached(&r, a).0, DatabaseId(3));
+    assert_eq!(attached(&r, b).0, DatabaseId(1));
+    assert!(r.snapshot().inventory.creating().is_empty());
+    assert_eq!(r.snapshot().inventory.ready().len(), 1);
+    assert_eq!(r.snapshot().inventory.ready()[0].database_id, DatabaseId(4));
+    assert!(r.snapshot().waiters().is_empty());
+}
+
+#[test]
+fn grouped_failures_replenish_supply_in_one_growth_request() {
+    let mut r = ready(config(0, 0, 4));
+    let waiting = r.attach("waiting");
+    pump(&mut r);
+    r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+        results: (1..=4)
+            .map(|id| CreationResult { database_id: DatabaseId(id), result: Err(failure()) })
+            .collect(),
+    }));
+    r.step(ActorId::Manager);
+    assert!(matches!(r.reply(waiting), ReplySlot::Pending));
+    assert_eq!(r.snapshot().inventory.creating().len(), 4);
+    assert_eq!(r.trace().iter().filter(|event| event.starts_with("create ")).count(), 2);
+}
+
+#[test]
+fn grouped_startup_results_stop_at_first_failure() {
+    let mut r = SimRuntime::new(config(3, 0, 0));
+    pump(&mut r);
+    r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+        results: vec![
+            CreationResult { database_id: DatabaseId(1), result: Ok(db(DatabaseId(1))) },
+            CreationResult { database_id: DatabaseId(2), result: Err(failure()) },
+            CreationResult { database_id: DatabaseId(3), result: Ok(db(DatabaseId(3))) },
+        ],
+    }));
+    assert_eq!(r.step(ActorId::Manager), crate::simulation::StepResult::Stopped);
+    assert!(matches!(r.startup_result(), Some(Err(_))));
+    assert_eq!(r.snapshot().inventory.ready().len(), 1);
+    assert!(r.active_creations().is_empty());
+}
+
+#[test]
 fn unknown_and_duplicate_creation_results_cannot_supply_database() {
     let mut r = ready(config(1, 0, 0));
     let a = r.attach("a");
     pump(&mut r);
     let (id, _) = attached(&r, a);
     for database_id in [id, DatabaseId(999)] {
-        r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationFinished {
-            database_id,
-            result: Ok(db(database_id)),
+        r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+            results: vec![CreationResult { database_id, result: Ok(db(database_id)) }],
         }));
     }
     pump(&mut r);
@@ -399,13 +462,17 @@ fn creation_window_refills_and_maps_out_of_order_results() {
     assert_eq!(r.snapshot().inventory.ready().len(), 5);
 }
 #[test]
-fn startup_failure_stops_without_waiting_for_remaining_results() {
+fn startup_failure_is_reported_after_the_full_batch_finishes() {
     let mut r = SimRuntime::new(config(3, 0, 0));
     pump(&mut r);
     r.complete_creation(DatabaseId(1), Ok(db(DatabaseId(1))));
     pump(&mut r);
     assert!(r.startup_result().is_none());
     r.complete_creation(DatabaseId(2), Err(failure()));
+    pump(&mut r);
+    assert!(r.startup_result().is_none());
+    assert!(r.snapshot().inventory.ready().is_empty());
+    r.complete_creation(DatabaseId(3), Ok(db(DatabaseId(3))));
     pump(&mut r);
     assert!(matches!(r.startup_result(), Some(Err(_))));
     assert_eq!(r.snapshot().inventory.ready().len(), 1);
@@ -441,9 +508,11 @@ fn shutdown_message_stops_dispatch_and_repeated_shutdown_is_harmless() {
     assert!(matches!(r.reply(request), ReplySlot::Cancelled));
     let trace = r.trace();
     r.shutdown();
-    r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationFinished {
-        database_id: DatabaseId(999),
-        result: Ok(db(DatabaseId(999))),
+    r.inject(ManagerMessage::DatabaseWorker(DatabaseWorkerMessages::CreationsFinished {
+        results: vec![CreationResult {
+            database_id: DatabaseId(999),
+            result: Ok(db(DatabaseId(999))),
+        }],
     }));
     pump(&mut r);
     assert_eq!(r.trace(), trace);

@@ -2,12 +2,12 @@
 use std::sync::Arc;
 
 use futures_util::{StreamExt, stream::FuturesUnordered};
+use hotpath::wrap::tokio::sync::mpsc;
 use pgtest_engine_backend::{
     DatabaseCleaner,
     jobs::{CleanupDatabase, DatabaseWorkerMessages},
     workers::{CleanupAction, CleanupState},
 };
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct CleanupActor<DatabaseClient, ManagerMessage> {

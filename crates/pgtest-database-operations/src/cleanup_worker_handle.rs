@@ -7,12 +7,12 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 pub use cleanup_pg_client::CleanupClient;
 use cleanup_worker::CleanupActor;
+use hotpath::wrap::tokio::sync::mpsc;
 use pgtest_engine_backend::{
     DatabaseCleaner, WorkerUnavailable,
     jobs::{CleanupDatabase, DatabaseWorkerMessages},
     workers::CleanupState,
 };
-use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{config::PostgresConfig, errors::PostgresClientError};
@@ -48,7 +48,8 @@ impl CleanupHandle {
         tracker: TaskTracker,
         shutdown: CancellationToken,
     ) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) =
+            hotpath::channel!(tokio::sync::mpsc::unbounded_channel(), label = "cleanup");
         let actor =
             CleanupActor { client, state: CleanupState::new(limit), receiver, manager, shutdown };
         tokio::spawn(tracker.track_future(async move { actor.run().await }));

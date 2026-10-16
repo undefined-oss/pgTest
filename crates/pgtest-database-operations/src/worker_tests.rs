@@ -60,7 +60,8 @@ async fn handles_validate_their_own_clients_before_spawning() {
     drop(listener);
     config.pgtest_pg_host = "127.0.0.1".parse().unwrap();
     config.pgtest_pg_port = port.try_into().unwrap();
-    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel::<DatabaseWorkerMessages>();
+    let (events, mut receiver) =
+        hotpath::channel!(tokio::sync::mpsc::unbounded_channel::<DatabaseWorkerMessages>());
     let shutdown = CancellationToken::new();
     let tracker = TaskTracker::new();
     assert!(

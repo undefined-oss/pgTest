@@ -83,6 +83,31 @@ The SQL report includes `tokio-postgres` query timings, with generated database
 names grouped under stable CREATE/DROP labels. Pool waits are measured separately
 by the database manager's acquisition functions.
 
+The channel report includes `manager`, `creation`, and `cleanup`, with sent and
+received message counts, current/peak queue depth, and queue latency. Set
+`HOTPATH_REPORT=channels HOTPATH_OUTPUT_FORMAT=json` to capture only this report.
+The same controls work for the server built with `--features hotpath`.
+Creation counts are batch requests; each completed request returns one message
+containing every database's success or failure. Results wait for the full batch,
+including its slowest creation. The manager total counts these batch completions,
+plus attach, release, expiry, and shutdown messages. Attaches served directly
+from the shared lease map add no messages.
+Instrumentation wraps the existing endpoints without forwarding tasks and is
+disabled in builds without Hotpath.
+
+The function report measures the papaya read path separately as
+`manager_handle::lease_lookup`, including pinning, lookup, and cloning a published
+session. Both hits and misses count. Use `HOTPATH_REPORT=functions,channels` to
+see lookup timings alongside queue message counts.
+
+Creation batch processing has separate function timings: `handle_creation_results`
+for the full manager handler, `settle_creation_results` for updating inventory,
+`dispatch_waiters` for lease assignment, and `grow` for replenishment decisions.
+`creation_worker::send_results` measures enqueueing the completed batch; channel
+latency measures the subsequent wait until receipt. The results vector moves
+through the channel without cloning its contents. These timings are nested;
+the full handler already includes settlement, dispatch, and growth.
+
 ## Shell completion
 
 Completion uses bpaf's built-in shell support and works without PostgreSQL.
