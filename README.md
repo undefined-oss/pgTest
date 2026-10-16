@@ -121,8 +121,8 @@ upstream user named `postgres`, and PostgreSQL on port `5432`.
 
 The upstream user must be able to clone the template and create and drop databases.
 Finish migrations and close connections to the template before PgTest starts
-cloning it. Leased application connections currently require upstream `trust`
-authentication; password authentication and TLS are not supported on that path.
+cloning it. Leased application connections relay PostgreSQL authentication directly
+to the client, including password authentication. TLS is not supported on that path.
 Database management currently uses the configured user with the fixed password
 `postgres`. Use a PostgreSQL instance dedicated to tests.
 
@@ -218,8 +218,10 @@ PostgreSQL client to use the PgTest socket directory as its host.
 ### Configure PostgreSQL for disposable tests
 
 Create the PostgreSQL container with these settings to reduce overhead during
-tests. **`POSTGRES_HOST_AUTH_METHOD=trust` is mandatory** for PgTest's current
-upstream authentication support.
+tests. This example uses `POSTGRES_HOST_AUTH_METHOD=trust` to avoid password
+authentication; it is optional. If you require passwords, configure the management
+user with password `postgres` and supply your application user's credentials in
+the test suite's connection settings.
 
 ```sh
 docker run --rm --name pgtest-postgres \

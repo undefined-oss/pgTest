@@ -6,12 +6,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::connection::{ClientStream, handle_connection};
+pub use crate::connection::{ConnectionFieldError, parse_connection_field};
 #[cfg(unix)]
 pub use crate::unix_listener::UnixWireListener;
-pub use crate::{
-    connection::{ConnectionFieldError, parse_connection_field},
-    postgres_upstream::RawBytes,
-};
 
 #[derive(Error, Debug)]
 pub enum WireError {
@@ -165,6 +162,68 @@ mod listener_test {
         engine: ManagerConfig,
     ) -> Result<pgtest::runtime::TokioRuntime, pgtest::runtime::StartError> {
         pgtest::runtime::TokioRuntime::start(config, engine).await
+    }
+
+    #[tokio::test]
+    async fn upstream_scram_authentication_and_errors_reach_the_client() {
+        use pgtest_database_operations::{config::PostgresConfig, testcontainer::Postgres};
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let postgres = Postgres::default()
+                .with_env_var("POSTGRES_HOST_AUTH_METHOD", "scram-sha-256")
+                .start()
+                .await
+                .unwrap();
+            let config = PostgresConfig {
+                pgtest_pg_host: postgres.get_host().await.unwrap().to_string().parse().unwrap(),
+                pgtest_pg_port: postgres
+                    .get_host_port_ipv4(5432)
+                    .await
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                ..PostgresConfig::default()
+            };
+            let template = config.pgtest_pg_database.clone();
+            let runtime = start_runtime(config, ManagerConfig::default()).await.unwrap();
+            let engine = Arc::new(runtime.handle());
+            let listener = wire_listener::run_with_handle(
+                engine.clone(),
+                ([127, 0, 0, 1], 0).into(),
+                &template,
+            )
+            .await
+            .unwrap();
+            let mut client_config = tokio_postgres::Config::new();
+            client_config
+                .host("127.0.0.1")
+                .port(listener.local_addr().port())
+                .user("postgres")
+                .password("incorrect")
+                .dbname(&format!("{template}/scram"));
+            let error = match client_config.connect(tokio_postgres::NoTls).await {
+                Err(error) => error,
+                Ok(_) => panic!("incorrect password was accepted"),
+            };
+            assert_eq!(error.as_db_error().unwrap().code().code(), "28P01");
+
+            client_config.password("postgres");
+            let (client, connection) = client_config.connect(tokio_postgres::NoTls).await.unwrap();
+            let driver = tokio::spawn(connection);
+            let database: String =
+                client.query_one("SELECT current_database()", &[]).await.unwrap().get(0);
+            assert!(database.starts_with(&format!("{template}_")));
+            engine.release(pgtest::manager_handle::LeaseId::new("scram").unwrap()).await.unwrap();
+            let _ = driver.await.unwrap();
+            assert!(client.is_closed());
+            drop(client);
+            listener.shutdown().await;
+            drop(engine);
+            runtime.shutdown().await;
+        })
+        .await
+        .expect("SCRAM startup and relay must finish");
     }
 
     #[tokio::test]

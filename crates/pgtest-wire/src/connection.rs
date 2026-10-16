@@ -6,7 +6,6 @@ use pgtest::manager_handle::{
     errors::{AttachError, InvalidLeaseId},
 };
 use pgwire::{
-    api::auth::protocol_negotiation,
     error::ErrorInfo,
     messages::{PgWireBackendMessage, PgWireFrontendMessage, startup::Startup},
     tokio::server::{MaybeTls, PgWireMessageServerCodec, negotiate_tls},
@@ -106,19 +105,6 @@ pub(crate) async fn handle_connection(
         return;
     }
 
-    if let Err(error) = protocol_negotiation(&mut framed, &startup).await {
-        tracing::debug!(%error, "client protocol negotiation failed");
-        return;
-    }
-
-    if let Err(error) = framed
-        .send(PgWireBackendMessage::Authentication(pgwire::messages::startup::Authentication::Ok))
-        .await
-    {
-        tracing::debug!(%error, "unable to send client authentication response");
-        return;
-    }
-
     let lease_session = match manager.attach(lease_id).await {
         Ok(session) => session,
         Err(error) => {
@@ -132,7 +118,7 @@ pub(crate) async fn handle_connection(
         }
     };
     let cancellation = lease_session.cancellation_token();
-    let upstream_session = tokio::select! {
+    let upstream_stream = tokio::select! {
         biased;
         _ = cancellation.cancelled() => {
             reject_connection(&mut framed, "55000", "lease was closed during connection startup").await;
@@ -140,7 +126,7 @@ pub(crate) async fn handle_connection(
         }
         result = postgres_upstream::connect(
             &lease_session.target,
-            params,
+            startup,
         ) => match result {
             Ok(session) => session,
             Err(error) => {
@@ -152,7 +138,7 @@ pub(crate) async fn handle_connection(
     };
     let parts = framed.into_parts();
     if let Err(error) =
-        session_relay::run(parts.io, upstream_session, parts.read_buf, lease_session).await
+        session_relay::run(parts.io, upstream_stream, parts.read_buf, cancellation).await
     {
         tracing::debug!(%error, "session relay ended with an I/O error");
     }
