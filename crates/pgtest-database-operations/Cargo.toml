@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 testcontainers = { workspace = true, optional = true }
-pgtest-utils = { version = "=0.1.0", path = "../pgtest-utils"}
+pgtest-utils = { version = "=0.2.0", path = "../pgtest-utils"}
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

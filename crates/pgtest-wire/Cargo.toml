@@ -13,7 +13,7 @@ name = "pgtest_pg_wire"
 workspace = true
 
 [dependencies]
-pgtest-utils = { version = "=0.1.0", path = "../pgtest-utils" }
+pgtest-utils = { version = "=0.2.0", path = "../pgtest-utils" }
 derive_more = { workspace = true, features = ["full"] }
 pest = "2.9.1"
 pest_derive = "2.9.1"
@@ -26,16 +26,16 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 hotpath = { workspace = true }
-pgtest-core = { version = "=0.1.0", path = "../pgtest-core"}
-pgtest-engine-backend = { version = "=0.1.0", path = "../pgtest-engine-backend" }
+pgtest-core = { version = "=0.2.0", path = "../pgtest-core"}
+pgtest-engine-backend = { version = "=0.2.0", path = "../pgtest-engine-backend" }
 
 [dev-dependencies]
-pgtest-core = { version = "=0.1.0", path = "../pgtest-core", features = ["test-support"] }
+pgtest-core = { version = "=0.2.0", path = "../pgtest-core", features = ["test-support"] }
 tokio-postgres = "0.7.18"
 tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 tokio = { workspace = true, features = ["test-util"] }
 testcontainers = { workspace = true }
-pgtest-database-operations = { version = "=0.1.0", path = "../pgtest-database-operations", features = ["test-support"]}
+pgtest-database-operations = { version = "=0.2.0", path = "../pgtest-database-operations", features = ["test-support"]}
 
 [features]
 default = []
