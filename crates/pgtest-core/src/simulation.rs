@@ -1,7 +1,7 @@
 //! Deterministic runtime: no futures, executor, wall clock, threads, or Tokio.
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     rc::Rc,
     time::Duration,
@@ -12,6 +12,7 @@ use pgtest_engine_backend::{
     jobs::{CleanupDatabase, CreateDatabases, DatabaseId, DatabaseWorkerMessages},
     workers::{CleanupAction, CleanupState, CreationAction, CreationState},
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     config::ManagerConfig,
@@ -60,12 +61,20 @@ enum CleanupInput {
     Command(CleanupDatabase),
     Complete(DatabaseId, Result<(), BackendError>),
 }
+struct SimAssignment {
+    lease: LeaseId,
+    subscribers: BTreeSet<RequestId>,
+}
+
 #[derive(Default)]
 struct Shared {
     manager: VecDeque<ManagerMessage<RequestId>>,
     creation: VecDeque<CreationInput>,
     cleanup: VecDeque<CleanupInput>,
     replies: BTreeMap<RequestId, ReplySlot>,
+    waiting: FxHashMap<LeaseId, RequestId>,
+    assignments: BTreeMap<RequestId, SimAssignment>,
+    subscriptions: BTreeMap<RequestId, RequestId>,
     timers: Vec<Timer>,
     cancelled: Vec<LeaseKey>,
     closed: [bool; 3],
@@ -73,10 +82,42 @@ struct Shared {
     trace: Vec<String>,
     sequence: u64,
 }
+impl Shared {
+    // Model dropping one strong shared-future clone. Only the last owner
+    // removes the pending assignment; queued work does not own a subscriber.
+    fn unsubscribe(&mut self, request: RequestId) {
+        let Some(id) = self.subscriptions.remove(&request) else { return };
+        let assignment = self.assignments.get_mut(&id).unwrap();
+        assignment.subscribers.remove(&request);
+        if assignment.subscribers.is_empty() {
+            let assignment = self.assignments.remove(&id).unwrap();
+            if self.waiting.get(&assignment.lease) == Some(&id) {
+                self.waiting.remove(&assignment.lease);
+            }
+        }
+    }
+}
 #[derive(Clone)]
 pub struct SimPorts(Rc<RefCell<Shared>>);
 impl ManagerIO for SimPorts {
     type ReplyHandle = RequestId;
+
+    fn reply_is_closed(&self, reply: &RequestId) -> bool {
+        let s = self.0.borrow();
+        !s.assignments.contains_key(reply)
+            && !matches!(s.replies.get(reply), Some(ReplySlot::Pending))
+    }
+
+    fn waiting_len(&self) -> usize {
+        self.0.borrow().waiting.len()
+    }
+
+    fn finish_waiting(&mut self, lease: &LeaseId, generation: u64) {
+        let mut s = self.0.borrow_mut();
+        if s.waiting.get(lease) == Some(&RequestId(generation)) {
+            s.waiting.remove(lease);
+        }
+    }
 
     fn request_creation(&mut self, request: CreateDatabases) -> Result<(), IOError> {
         let mut s = self.0.borrow_mut();
@@ -100,6 +141,17 @@ impl ManagerIO for SimPorts {
 
     fn reply(&mut self, id: RequestId, reply: ConsumerReply) -> Result<(), ConsumerReply> {
         let mut s = self.0.borrow_mut();
+        if let Some(assignment) = s.assignments.remove(&id) {
+            if s.waiting.get(&assignment.lease) == Some(&id) {
+                s.waiting.remove(&assignment.lease);
+            }
+            for subscriber in assignment.subscribers {
+                s.subscriptions.remove(&subscriber);
+                s.trace.push(format!("reply {subscriber:?} {reply:?}"));
+                s.replies.insert(subscriber, ReplySlot::Delivered(reply.clone()));
+            }
+            return Ok(());
+        }
         if !matches!(s.replies.get(&id), Some(ReplySlot::Pending)) {
             return Err(reply);
         }
@@ -191,6 +243,9 @@ impl SimRuntime {
 
     pub fn attach(&mut self, lease: &str) -> RequestId {
         let reply = self.request();
+        if self.shared.borrow().closed[0] {
+            return reply;
+        }
         if self.startup_result.is_none() {
             let _ = SimPorts(self.shared.clone())
                 .reply(reply, ConsumerReply::AttachRejected(AttachError::EngineUnavailable));
@@ -199,11 +254,24 @@ impl SimRuntime {
         if !self.claim_timeout.is_zero() {
             self.deadlines.insert(reply, (ElapsedTime(self.now.0 + self.claim_timeout), true));
         }
-        self.inject(ManagerMessage::AttachOrJoin {
-            lease: LeaseId::new(lease).unwrap(),
-            reply,
-            message_time: self.now,
-        });
+        let lease = LeaseId::new(lease).unwrap();
+        let mut s = self.shared.borrow_mut();
+        if let Some(id) = s.waiting.get(&lease).copied() {
+            s.assignments.get_mut(&id).unwrap().subscribers.insert(reply);
+            s.subscriptions.insert(reply, id);
+        } else {
+            s.waiting.insert(lease.clone(), reply);
+            s.assignments.insert(
+                reply,
+                SimAssignment { lease: lease.clone(), subscribers: BTreeSet::from([reply]) },
+            );
+            s.subscriptions.insert(reply, reply);
+            s.manager.push_back(ManagerMessage::AttachOrJoin {
+                lease,
+                reply,
+                waiting_generation: reply.0,
+            });
+        }
         reply
     }
 
@@ -237,7 +305,9 @@ impl SimRuntime {
 
     /// Dropping a reply or session does not release an assigned lease.
     pub fn drop_session(&mut self, id: RequestId) {
-        self.shared.borrow_mut().replies.insert(id, ReplySlot::Cancelled);
+        let mut s = self.shared.borrow_mut();
+        s.unsubscribe(id);
+        s.replies.insert(id, ReplySlot::Cancelled);
     }
 
     pub fn session_cancelled(&self, key: &LeaseKey) -> bool {
@@ -288,6 +358,7 @@ impl SimRuntime {
                     crate::manager_handle::errors::ReleaseError::ReplyTimedOut,
                 ))
             };
+            s.unsubscribe(*id);
             s.replies.insert(*id, ReplySlot::Delivered(reply));
             false
         });
@@ -451,6 +522,9 @@ impl SimRuntime {
         let mut s = self.shared.borrow_mut();
         s.closed = [true; 3];
         s.manager.clear();
+        s.waiting.clear();
+        s.assignments.clear();
+        s.subscriptions.clear();
         s.creation.clear();
         s.cleanup.clear();
         s.timers.clear();

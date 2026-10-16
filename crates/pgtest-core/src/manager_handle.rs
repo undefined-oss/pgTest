@@ -7,6 +7,8 @@ pub mod manager_worker;
 pub mod messages;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "tokio-runtime")]
+pub(crate) mod waiting;
 
 pub use lease::LeaseId;
 #[cfg(feature = "tokio-runtime")]
@@ -18,7 +20,7 @@ pub(crate) use tokio_handle::{Reply, TokioMessage};
 
 #[cfg(feature = "tokio-runtime")]
 mod tokio_handle {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use hotpath::wrap::tokio::sync::mpsc;
     use tokio::sync::oneshot;
@@ -28,8 +30,10 @@ mod tokio_handle {
         LeaseId, LeaseSession,
         errors::{AttachError, ReleaseError},
         lease::SharedLeases,
-        messages::{ConsumerReply, ElapsedTime, ManagerMessage},
+        messages::{ConsumerReply, ManagerMessage},
+        waiting::WaitingRegistry,
     };
+    #[derive(Clone, Debug)]
     pub(crate) enum Reply {
         Attached(LeaseSession),
         Engine(ConsumerReply),
@@ -39,6 +43,7 @@ mod tokio_handle {
     #[derive(Clone)]
     pub struct ManagerHandle {
         pub(crate) leases: SharedLeases,
+        pub(crate) waiting: Arc<WaitingRegistry>,
         pub(crate) commands: mpsc::UnboundedSender<TokioMessage>,
         pub(crate) epoch: tokio::time::Instant,
         pub(crate) claim_timeout: Duration,
@@ -67,19 +72,20 @@ mod tokio_handle {
                 };
             }
             let started = tokio::time::Instant::now();
-            let (tx, rx) = oneshot::channel();
-            self.commands
-                .send(ManagerMessage::AttachOrJoin {
-                    lease,
-                    reply: tx,
-                    message_time: ElapsedTime(started.duration_since(self.epoch)),
+            let (assignment, work) = self.waiting.register(lease);
+            if let Some(work) = work {
+                hotpath::measure_block!("manager_handle::submit_assignment", {
+                    self.commands.send(work)
                 })
                 .map_err(|_| AttachError::EngineUnavailable)?;
-            let wait = async {
+            }
+            // Own the shared clone inside the timed future. Cancelling this
+            // caller drops its subscription even when the manager is idle.
+            let wait = async move {
                 tokio::select! {
                     biased;
                     _ = self.shutdown.cancelled() => Err(AttachError::EngineUnavailable),
-                    reply = rx => reply.map_err(|_| AttachError::EngineUnavailable),
+                    reply = hotpath::future!(assignment, label = "manager_handle::wait_assignment") => reply,
                 }
             };
             let reply = if self.claim_timeout.is_zero() {
