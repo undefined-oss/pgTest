@@ -5,7 +5,7 @@ use tokio::io::{AsyncWriteExt, copy_bidirectional_with_sizes};
 
 use crate::postgres_upstream::UpstreamSession;
 
-const RELAY_BUF: usize = 16 * 1024;
+const RELAY_BUF: usize = 64 * 1024;
 
 #[hotpath::measure]
 pub(crate) async fn run(

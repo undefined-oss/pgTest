@@ -137,7 +137,9 @@ impl ExtendedQueryHandler for PgTestControlPanel {
             Some(statement) => client.portal_store().put_statement(Arc::new(statement)),
             None => client.portal_store().put_empty_statement(name),
         }
-        client.send(PgWireBackendMessage::ParseComplete(ParseComplete::new())).await?;
+        // Batch acknowledgements until a subsequent response, Flush, or Sync
+        // flushes them.
+        client.feed(PgWireBackendMessage::ParseComplete(ParseComplete::new())).await?;
         Ok(())
     }
 
@@ -187,7 +189,7 @@ impl ExtendedQueryHandler for PgTestControlPanel {
             }
             None => return Err(PgWireError::StatementNotFound(statement_name.to_owned())),
         }
-        client.send(PgWireBackendMessage::BindComplete(BindComplete::new())).await?;
+        client.feed(PgWireBackendMessage::BindComplete(BindComplete::new())).await?;
         Ok(())
     }
 }
@@ -260,17 +262,306 @@ impl QueryParser for ControlQueryParser {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use pgwire::{
-        api::{Type, portal::Portal, stmt::StoredStatement},
-        error::PgWireError,
-        messages::extendedquery::Bind,
+    use std::{
+        io,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
     };
 
+    use bytes::Bytes;
+    use pgtest::{config::ManagerConfig, runtime::TokioRuntime};
+    use pgtest_database_operations::testcontainer::pg_container_config;
+    use pgwire::{
+        api::{
+            ClientInfo, DefaultClient, PgWireConnectionState, PgWireServerHandlers, Type,
+            portal::Portal, stmt::StoredStatement,
+        },
+        error::PgWireError,
+        messages::{
+            PgWireFrontendMessage,
+            extendedquery::{Bind, Describe, Execute, Flush, Parse, Sync},
+        },
+        tokio::server::{PgWireMessageServerCodec, process_error, process_message},
+    };
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio_util::codec::Framed;
+
     use super::{parse_lease_id, resolve_lease_id};
-    use crate::control_panel::{LeaseArgument, PgTestQueryTypeControlStatement};
+    use crate::control_panel::{
+        LeaseArgument, PgTestControlPanel, PgTestQueryTypeControlStatement,
+    };
+
+    #[derive(Default)]
+    struct RecordingIo {
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl AsyncRead for RecordingIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for RecordingIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.writes.push(bytes.to_vec());
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    type TestConnection =
+        Framed<RecordingIo, PgWireMessageServerCodec<PgTestQueryTypeControlStatement>>;
+
+    async fn dispatch(
+        client: &mut TestConnection,
+        handlers: &Arc<PgTestControlPanel>,
+        message: PgWireFrontendMessage,
+    ) {
+        let wait_for_sync = message.is_extended_query();
+        if let Err(error) = process_message(
+            message,
+            client,
+            handlers.startup_handler(),
+            handlers.clone(),
+            handlers.clone(),
+            handlers.copy_handler(),
+            handlers.cancel_handler(),
+        )
+        .await
+        {
+            process_error(client, error, wait_for_sync).await.unwrap();
+        }
+    }
+
+    fn parse() -> PgWireFrontendMessage {
+        PgWireFrontendMessage::Parse(Parse::new(None, "SELECT 1".into(), vec![]))
+    }
+
+    fn bind() -> PgWireFrontendMessage {
+        PgWireFrontendMessage::Bind(Bind::new(None, None, vec![], vec![], vec![]))
+    }
+
+    // Return the protocol message tags in each actual transport write.
+    fn take_writes(client: &mut TestConnection) -> Vec<Vec<u8>> {
+        std::mem::take(&mut client.get_mut().writes)
+            .into_iter()
+            .map(|write| {
+                let mut tags = Vec::new();
+                let mut remaining = write.as_slice();
+                while !remaining.is_empty() {
+                    tags.push(remaining[0]);
+                    let length = u32::from_be_bytes(remaining[1..5].try_into().unwrap()) as usize;
+                    assert!(length >= 4);
+                    remaining = &remaining[1 + length..];
+                }
+                tags
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn extended_acknowledgements_preserve_flush_boundaries_and_error_recovery() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let runtime =
+                TokioRuntime::start(pg_container_config().await, ManagerConfig::default())
+                    .await
+                    .unwrap();
+            let handlers = Arc::new(PgTestControlPanel::new(Arc::new(runtime.handle())));
+            let codec = PgWireMessageServerCodec::new(DefaultClient::new(
+                ([127, 0, 0, 1], 0).into(),
+                false,
+            ));
+            let mut client = Framed::new(RecordingIo::default(), codec);
+            client.set_state(PgWireConnectionState::ReadyForQuery);
+
+            // Exercise the actual release response from the profiled workload:
+            // 26 bytes of result/completion plus 6 bytes of ReadyForQuery.
+            dispatch(
+                &mut client,
+                &handlers,
+                PgWireFrontendMessage::Parse(Parse::new(
+                    None,
+                    "SELECT pgtest_release('batching-test')".into(),
+                    vec![],
+                )),
+            )
+            .await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(
+                &mut client,
+                &handlers,
+                PgWireFrontendMessage::Describe(Describe::new(b'P', None)),
+            )
+            .await;
+            assert_eq!(take_writes(&mut client), vec![b"12T".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            assert_eq!(client.get_ref().writes.iter().map(Vec::len).collect::<Vec<_>>(), vec![26]);
+            assert_eq!(take_writes(&mut client), vec![b"DC".to_vec()]);
+            assert!(client.write_buffer().is_empty());
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(client.get_ref().writes.iter().map(Vec::len).collect::<Vec<_>>(), vec![6]);
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            // The common Parse/Bind/Describe sequence becomes one transport
+            // write.
+            dispatch(&mut client, &handlers, parse()).await;
+            dispatch(&mut client, &handlers, bind()).await;
+            assert!(take_writes(&mut client).is_empty());
+            dispatch(
+                &mut client,
+                &handlers,
+                PgWireFrontendMessage::Describe(Describe::new(b'P', None)),
+            )
+            .await;
+            assert_eq!(take_writes(&mut client), vec![b"12T".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            assert_eq!(take_writes(&mut client), vec![b"DC".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            // Clients can explicitly request either acknowledgement before
+            // continuing.
+            for (message, tag) in [(parse(), b'1'), (bind(), b'2')] {
+                dispatch(&mut client, &handlers, message).await;
+                assert!(take_writes(&mut client).is_empty());
+                dispatch(&mut client, &handlers, PgWireFrontendMessage::Flush(Flush::new())).await;
+                assert_eq!(take_writes(&mut client), vec![vec![tag]]);
+            }
+
+            // Execute delivers its result immediately; a subsequent Flush
+            // does not send duplicate bytes.
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            assert_eq!(take_writes(&mut client), vec![b"DC".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Flush(Flush::new())).await;
+            assert!(take_writes(&mut client).is_empty());
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            // Sync also drains buffered acknowledgements without
+            // Describe/Execute.
+            dispatch(&mut client, &handlers, parse()).await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"12Z".to_vec()]);
+
+            // A Bind error flushes the earlier ParseComplete before
+            // ErrorResponse.
+            dispatch(&mut client, &handlers, parse()).await;
+            let invalid_bind = Bind::new(
+                None,
+                None,
+                vec![],
+                vec![Some(Bytes::from_static(b"unexpected"))],
+                vec![],
+            );
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Bind(invalid_bind)).await;
+            assert_eq!(take_writes(&mut client), vec![b"1E".to_vec()]);
+            assert!(matches!(client.state(), PgWireConnectionState::AwaitingSync));
+            dispatch(&mut client, &handlers, bind()).await;
+            assert!(take_writes(&mut client).is_empty());
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+            assert!(matches!(client.state(), PgWireConnectionState::ReadyForQuery));
+
+            // A fresh extended query succeeds after error recovery, without
+            // Describe.
+            dispatch(&mut client, &handlers, parse()).await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            assert_eq!(take_writes(&mut client), vec![b"12DC".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            // A later pipeline error follows the already flushed completion.
+            dispatch(&mut client, &handlers, parse()).await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            dispatch(
+                &mut client,
+                &handlers,
+                PgWireFrontendMessage::Parse(Parse::new(None, "SELECT 2".into(), vec![])),
+            )
+            .await;
+            assert_eq!(take_writes(&mut client), vec![b"12DC".to_vec(), b"E".to_vec()]);
+            assert!(matches!(client.state(), PgWireConnectionState::AwaitingSync));
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            // A bounded fetch keeps PortalSuspended's existing immediate flush.
+            // Resuming the portal delivers no duplicate row and flushes
+            // completion immediately, as with an unbounded Execute.
+            dispatch(&mut client, &handlers, parse()).await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 1)))
+                .await;
+            assert_eq!(take_writes(&mut client), vec![b"12Ds".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            assert_eq!(take_writes(&mut client), vec![b"C".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            // Empty portals retain pgwire's EmptyQueryResponse handling.
+            dispatch(
+                &mut client,
+                &handlers,
+                PgWireFrontendMessage::Parse(Parse::new(None, "".into(), vec![])),
+            )
+            .await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"12IZ".to_vec()]);
+
+            // Buffer pressure may flush early; every response still arrives in
+            // order, and Sync remains the final boundary.
+            client.set_backpressure_boundary(1);
+            dispatch(&mut client, &handlers, parse()).await;
+            dispatch(&mut client, &handlers, bind()).await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Execute(Execute::new(None, 0)))
+                .await;
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client).concat(), b"12DCZ");
+
+            // A missing portal still produces an immediate Execute error.
+            dispatch(
+                &mut client,
+                &handlers,
+                PgWireFrontendMessage::Execute(Execute::new(Some("missing".into()), 0)),
+            )
+            .await;
+            assert_eq!(take_writes(&mut client), vec![b"E".to_vec()]);
+            dispatch(&mut client, &handlers, PgWireFrontendMessage::Sync(Sync::new())).await;
+            assert_eq!(take_writes(&mut client), vec![b"Z".to_vec()]);
+
+            runtime.shutdown().await;
+        })
+        .await
+        .expect("extended protocol must not stall waiting for a flush");
+    }
 
     #[test]
     fn release_lease_validation_preserves_protocol_errors() {
