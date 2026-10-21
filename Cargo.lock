@@ -1858,6 +1858,7 @@ version = "0.1.0"
 dependencies = [
  "derive_more",
  "envconfig",
+ "futures-util",
  "hotpath",
  "papaya",
  "pgtest-database-operations",

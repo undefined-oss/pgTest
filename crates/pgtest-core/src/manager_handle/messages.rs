@@ -19,7 +19,7 @@ impl ElapsedTime {
 }
 #[derive(Clone, Debug)]
 pub enum ManagerMessage<ReplyHandle> {
-    AttachOrJoin { lease: LeaseId, reply: ReplyHandle, message_time: ElapsedTime },
+    AttachOrJoin { lease: LeaseId, reply: ReplyHandle, waiting_generation: u64 },
     ReleaseLease { lease: LeaseId, reply: ReplyHandle },
     LeaseMaxTimeReached { lease: LeaseId, generation: u64 },
     DatabaseWorker(DatabaseWorkerMessages),

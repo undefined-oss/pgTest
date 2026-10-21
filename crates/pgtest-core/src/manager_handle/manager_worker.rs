@@ -6,6 +6,7 @@ use std::{collections::VecDeque, time::Duration};
 use pgtest_engine_backend::jobs::{
     CleanupDatabase, CreateDatabases, CreationResult, DatabaseWorkerMessages,
 };
+#[cfg(any(test, feature = "test-support"))]
 use rustc_hash::FxHashMap;
 
 use super::{
@@ -21,6 +22,13 @@ use crate::config::ManagerConfig;
 pub trait ManagerIO {
     type ReplyHandle;
 
+    /// Allocation work does not own the caller's subscription.
+    fn reply_is_closed(&self, reply: &Self::ReplyHandle) -> bool;
+    /// Distinct pending assignments, including work still in the inbox.
+    fn waiting_len(&self) -> usize;
+    /// Remove only this registration; the lease ID may already have been
+    /// reused.
+    fn finish_waiting(&mut self, lease: &LeaseId, generation: u64);
     fn request_creation(&mut self, request: CreateDatabases) -> Result<(), IOError>;
     fn request_cleanup(&mut self, request: CleanupDatabase) -> Result<(), IOError>;
     fn reply(
@@ -37,12 +45,19 @@ pub trait ManagerIO {
     fn cancel_sessions(&mut self, key: &LeaseKey);
 }
 
+struct AssignmentWork<ReplyHandle> {
+    lease: LeaseId,
+    generation: u64,
+    reply: ReplyHandle,
+}
+
 pub struct ManagerWorker<IO: ManagerIO> {
     pub(crate) leases: SharedLeases,
     next_generation: u64,
     config: ManagerConfig,
-    pub(crate) waiters: VecDeque<LeaseId>,
-    group_waiters: FxHashMap<LeaseId, Vec<(IO::ReplyHandle, ElapsedTime)>>,
+    // Work notifications, not owners of waiting requests. Cancelled senders
+    // are skipped once; no registry scan or arbitrary queue removal is needed.
+    waiters: VecDeque<AssignmentWork<IO::ReplyHandle>>,
     io: IO,
     now: ElapsedTime,
     pub inventory: DatabaseInventory,
@@ -55,7 +70,6 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
             next_generation: 0,
             config,
             waiters: VecDeque::new(),
-            group_waiters: FxHashMap::default(),
             io,
             now: ElapsedTime::default(),
             inventory,
@@ -68,8 +82,8 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn waiters(&self) -> &VecDeque<LeaseId> {
-        &self.waiters
+    pub fn waiting_len(&self) -> usize {
+        self.io.waiting_len()
     }
 
     pub fn shutdown(&mut self) {
@@ -77,22 +91,24 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
             self.io
                 .cancel_sessions(&LeaseKey { lease: lease.clone(), generation: entry.generation });
         }
-        for (_, replies) in self.group_waiters.drain() {
-            for (reply, _) in replies {
-                let _ = self
-                    .io
-                    .reply(reply, ConsumerReply::AttachRejected(AttachError::EngineUnavailable));
-            }
+        for work in self.waiters.drain(..) {
+            let _ = self
+                .io
+                .reply(work.reply, ConsumerReply::AttachRejected(AttachError::EngineUnavailable));
+            self.io.finish_waiting(&work.lease, work.generation);
         }
-        self.waiters.clear();
     }
 
     #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     pub fn handle(&mut self, msg: ManagerMessage<IO::ReplyHandle>, now: ElapsedTime) {
         self.now = now;
         match msg {
-            ManagerMessage::AttachOrJoin { lease, reply, message_time } => {
-                self.attach_or_join(lease, reply, message_time);
+            ManagerMessage::AttachOrJoin { lease, reply, waiting_generation } => {
+                self.attach_or_join(AssignmentWork {
+                    lease,
+                    reply,
+                    generation: waiting_generation,
+                });
             }
             ManagerMessage::ReleaseLease { lease, reply } => {
                 self.retire_lease(&lease);
@@ -157,30 +173,30 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
         settled
     }
 
-    fn attach_or_join(
-        &mut self,
-        lease: LeaseId,
-        reply: IO::ReplyHandle,
-        message_time: ElapsedTime,
-    ) {
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
+    fn attach_or_join(&mut self, work: AssignmentWork<IO::ReplyHandle>) {
+        if self.io.reply_is_closed(&work.reply) {
+            self.io.finish_waiting(&work.lease, work.generation);
+            return;
+        }
+        let AssignmentWork { lease, reply, generation } = work;
         let database = self.leases.pin().get(&lease).map(|entry| entry.database.clone());
         if let Some(database) = database {
             self.reply_attached(&lease, database, reply);
+            self.io.finish_waiting(&lease, generation);
             return;
         }
 
         let Some(database) = self.inventory.take_ready() else {
-            if !self.group_waiters.contains_key(&lease) {
-                self.waiters.push_back(lease.clone());
-            }
-
-            self.group_waiters.entry(lease).or_default().push((reply, message_time));
+            self.waiters.push_back(AssignmentWork { lease, reply, generation });
             self.grow();
             return;
         };
 
         let database = self.assign_database(&lease, database);
-        if !self.reply_attached(&lease, database, reply) {
+        let delivered = self.reply_attached(&lease, database, reply);
+        self.io.finish_waiting(&lease, generation);
+        if !delivered {
             self.restore_unclaimed_database(&lease);
             self.dispatch_waiters();
         }
@@ -189,49 +205,29 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
 
     #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn dispatch_waiters(&mut self) {
-        while !self.inventory.ready().is_empty() {
-            let Some(lease) = self.waiters.pop_front() else {
+        while let Some(work) = self.waiters.front() {
+            if self.io.reply_is_closed(&work.reply) {
+                let work = self.waiters.pop_front().unwrap();
+                self.io.finish_waiting(&work.lease, work.generation);
+                continue;
+            }
+            let existing = self.leases.pin().get(&work.lease).map(|entry| entry.database.clone());
+            let assigned = existing.is_some();
+            let Some(database) = existing.or_else(|| self.inventory.take_ready()) else {
                 break;
             };
-
-            let Some(replies) = self.group_waiters.remove(&lease) else {
-                continue;
-            };
-
-            let mut claimed = self.leases.pin().contains_key(&lease);
-
-            for (reply, message_time) in replies {
-                if self.config.lease_claim_timeout_ms > 0
-                    && self.now.elapsed_since(message_time).as_millis()
-                        > self.config.lease_claim_timeout_ms
-                {
-                    let _ =
-                        self.io.reply(reply, ConsumerReply::AttachRejected(AttachError::TimedOut));
-                    continue;
-                }
-
-                let database = self.leases.pin().get(&lease).map(|entry| entry.database.clone());
-                let database = match database {
-                    Some(database) => database,
-                    None => {
-                        let database = self
-                            .inventory
-                            .take_ready()
-                            .expect("dispatch requires a ready database");
-
-                        self.assign_database(&lease, database)
-                    }
-                };
-
-                claimed |= self.reply_attached(&lease, database, reply);
-            }
-
-            if !claimed {
-                self.restore_unclaimed_database(&lease);
+            let work = self.waiters.pop_front().unwrap();
+            let database =
+                if assigned { database } else { self.assign_database(&work.lease, database) };
+            let delivered = self.reply_attached(&work.lease, database, work.reply);
+            self.io.finish_waiting(&work.lease, work.generation);
+            if !delivered && !assigned {
+                self.restore_unclaimed_database(&work.lease);
             }
         }
     }
 
+    #[cfg_attr(feature = "tokio-runtime", hotpath::measure)]
     fn reply_attached(
         &mut self,
         lease: &LeaseId,
@@ -305,18 +301,7 @@ impl<IO: ManagerIO> ManagerWorker<IO> {
             return;
         }
 
-        let waiting = self
-            .group_waiters
-            .iter()
-            .filter(|(lease, replies)| {
-                !self.leases.pin().contains_key(*lease)
-                    && replies.iter().any(|(_, queued_at)| {
-                        self.config.lease_claim_timeout_ms == 0
-                            || self.now.elapsed_since(*queued_at).as_millis()
-                                <= self.config.lease_claim_timeout_ms
-                    })
-            })
-            .count();
+        let waiting = self.io.waiting_len();
         // Preserve the inclusive starvation threshold after covering live
         // leases.
         let required = waiting + usize::from(*self.config.starvation_threshold) + 1;
@@ -377,9 +362,10 @@ mod tokio_io {
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     use super::*;
-    use crate::manager_handle::{LeaseSession, Reply, TokioMessage};
+    use crate::manager_handle::{LeaseSession, Reply, TokioMessage, waiting::WaitingRegistry};
     pub(crate) struct TokioPorts {
         pub(crate) leases: SharedLeases,
+        pub(crate) waiting: std::sync::Arc<WaitingRegistry>,
         pub(crate) creation: CreationHandle,
         pub(crate) cleanup: CleanupHandle,
         pub(crate) cancellations: HashMap<LeaseKey, CancellationToken>,
@@ -390,6 +376,18 @@ mod tokio_io {
     }
     impl ManagerIO for TokioPorts {
         type ReplyHandle = oneshot::Sender<Reply>;
+
+        fn reply_is_closed(&self, reply: &Self::ReplyHandle) -> bool {
+            reply.is_closed()
+        }
+
+        fn waiting_len(&self) -> usize {
+            self.waiting.len()
+        }
+
+        fn finish_waiting(&mut self, lease: &LeaseId, generation: u64) {
+            self.waiting.remove(lease, generation);
+        }
 
         fn request_creation(&mut self, request: CreateDatabases) -> Result<(), IOError> {
             self.creation.create(request).map_err(|_| IOError::FailedToSendTheMessage)
@@ -416,7 +414,11 @@ mod tokio_io {
                         target: target.clone(),
                         cancellation,
                     };
-                    if sender.send(Reply::Attached(session.clone())).is_err() {
+                    if hotpath::measure_block!("manager_worker::send_assignment", {
+                        sender.send(Reply::Attached(session.clone()))
+                    })
+                    .is_err()
+                    {
                         return Err(reply);
                     }
                     // The worker is the only assignment writer. Publish after

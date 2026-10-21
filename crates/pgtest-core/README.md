@@ -14,10 +14,32 @@ the wire receives a `ManagerHandle` and the configured template name. It validat
 the startup database before sending an attach request, then uses the returned
 `LeaseSession.target`. Manager receives lease IDs without template names.
 
-Requests carry their reply handle directly into the pending waiter list. Tokio
-uses a `oneshot::Sender`, with no request-ID counter or separate reply map. The
-deterministic simulator uses test-only request IDs to inspect replies; `ManagerIO`
-selects the reply handle type without adding Tokio to the synchronous message handler.
+Pending attachments share one assignment future per lease ID. A concurrent Papaya
+registry stores weak references to those futures; callers own strong clones and
+their individual request deadlines. The first registration sends one allocation
+work item containing the oneshot sender to Manager. One reply wakes all subscribers.
+Dropping the last subscriber closes the receiver and removes the registration
+directly, even when Manager or database creation is stalled. Generation checks
+prevent delayed cleanup from removing a newer registration for the same lease ID.
+
+Manager uses the registry size for distinct waiting demand, without scanning
+requests. Its allocation-work deque retains senders only; abandoned work is skipped
+once when consumed and does not contribute to demand. Active lease joins retain
+their direct shared-map lookup. `futures_util::Shared` synchronizes subscribers
+within each lease; the waiting registry has no global mutex.
+
+With `hotpath` enabled, registry registration, counting, removal, receiver polling,
+and drop cleanup have function measurements. The `waiting_registry::*` block
+labels separate weak-reference upgrades, stale removal, assignment creation, and
+insertion. `manager_handle::submit_assignment` and
+`manager_worker::send_assignment` measure submission and reply delivery;
+`manager_handle::wait_assignment` tracks each caller's shared-future lifecycle,
+including suspension and cancellation. These probes compile out when profiling
+is disabled.
+
+The deterministic simulator models subscribers and reply ownership using test-only
+request IDs. `ManagerIO` supplies pending-demand counts, receiver liveness, and
+generation-aware cleanup without adding Tokio to the synchronous message handler.
 
 ## Layout
 
@@ -32,6 +54,7 @@ src/
 │   ├── messages.rs
 │   ├── database_inventory.rs
 │   ├── lease.rs
+│   ├── waiting.rs
 │   ├── errors.rs
 │   └── tests.rs
 └── simulation.rs

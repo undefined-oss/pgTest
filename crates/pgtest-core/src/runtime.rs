@@ -78,6 +78,7 @@ impl TokioRuntime {
             hotpath::channel!(tokio::sync::mpsc::unbounded_channel(), label = "manager");
         let manager = ManagerHandle {
             leases: Default::default(),
+            waiting: Default::default(),
             commands,
             epoch: tokio::time::Instant::now(),
             claim_timeout: Duration::from_nanos_u128(
@@ -108,6 +109,7 @@ impl TokioRuntime {
         let epoch = self.manager.epoch;
         let ports = TokioPorts {
             leases: self.manager.leases.clone(),
+            waiting: self.manager.waiting.clone(),
             creation,
             cleanup,
             cancellations: HashMap::new(),
@@ -442,23 +444,15 @@ mod tests {
         cfg.engine.lease_claim_timeout_ms = 10;
         let runtime = start_runtime(backend, cfg).await.unwrap();
         let handle = runtime.handle();
-        let (reply, response) = oneshot::channel();
-        handle
-            .commands
-            .send(ManagerMessage::AttachOrJoin {
-                lease: LeaseId::new("expired").unwrap(),
-                reply,
-                message_time: ElapsedTime::default(),
-            })
-            .unwrap();
+        let expired = handle.attach(LeaseId::new("expired").unwrap());
+        tokio::pin!(expired);
+        assert!(poll_once(expired.as_mut()).is_pending());
         let creation = next(&mut creates).await;
         tokio::time::advance(Duration::from_millis(11)).await;
+        assert!(matches!(expired.await, Err(AttachError::TimedOut)));
+        assert_eq!(handle.waiting.len(), 0, "timeout cleans up without a database completion");
         creation.send(Ok(db("available"))).unwrap();
         next(&mut creates).await.send(Ok(db("spare"))).unwrap();
-        assert!(matches!(
-            response.await.unwrap(),
-            Reply::Engine(ConsumerReply::AttachRejected(AttachError::TimedOut))
-        ));
         let session = handle.attach(LeaseId::new("live").unwrap()).await.unwrap();
         assert_eq!(session.target.database, "available");
         runtime.shutdown().await;
@@ -566,6 +560,7 @@ mod tests {
         let backend = Arc::new(ImmediateBackend { sequence: Mutex::new(0) });
         let ports = TokioPorts {
             leases: runtime.manager.leases.clone(),
+            waiting: runtime.manager.waiting.clone(),
             creation: CreationHandle::new_with_client(
                 backend.clone(),
                 NonZeroUsize::new(1).unwrap(),
@@ -604,8 +599,133 @@ mod tests {
         future.poll(&mut Context::from_waker(Waker::noop()))
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn shared_callers_keep_individual_deadlines_and_cleanup_without_manager_progress() {
+        let (runtime, _worker, inbox) = manual_manager(0, 30);
+        let handle = runtime.handle();
+        let mut first = Box::pin(handle.attach(LeaseId::new("shared").unwrap()));
+        assert!(poll_once(first.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(15)).await;
+        let mut second = Box::pin(handle.attach(LeaseId::new("shared").unwrap()));
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert_eq!(inbox.len(), 1);
+        tokio::time::advance(Duration::from_millis(15)).await;
+        assert!(matches!(first.await, Err(AttachError::TimedOut)));
+        assert_eq!(handle.waiting.len(), 1);
+        assert!(poll_once(second.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(15)).await;
+        assert!(matches!(second.await, Err(AttachError::TimedOut)));
+        assert_eq!(handle.waiting.len(), 0);
+        assert_eq!(inbox.len(), 1, "cancellation must not send manager messages");
+        runtime.shutdown().await;
+    }
+
     #[tokio::test]
-    async fn published_attaches_bypass_inbox_and_queued_attaches_still_join() {
+    async fn dropping_last_caller_cleans_registry_before_or_after_work_is_queued() {
+        for process_work in [false, true] {
+            let (runtime, mut worker, mut inbox) = manual_manager(0, 0);
+            let handle = runtime.handle();
+            let mut first = Box::pin(handle.attach(LeaseId::new("shared").unwrap()));
+            let mut second = Box::pin(handle.attach(LeaseId::new("shared").unwrap()));
+            assert!(poll_once(first.as_mut()).is_pending());
+            assert!(poll_once(second.as_mut()).is_pending());
+            if process_work {
+                worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+            }
+            drop(first);
+            assert_eq!(worker.waiting_len(), 1);
+            drop(second);
+            assert_eq!(worker.waiting_len(), 0);
+            assert_eq!(inbox.len(), usize::from(!process_work));
+            worker.shutdown();
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn task_abort_removes_registration_and_stale_work_cannot_remove_replacement() {
+        let (runtime, mut worker, mut inbox) = manual_manager(1, 0);
+        let handle = runtime.handle();
+        let aborted = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.attach(LeaseId::new("shared").unwrap()).await })
+        };
+        let old_work = inbox.recv().await.unwrap();
+        assert_eq!(handle.waiting.len(), 1);
+        aborted.abort();
+        assert!(aborted.await.unwrap_err().is_cancelled());
+        assert_eq!(handle.waiting.len(), 0);
+        let mut replacement = Box::pin(handle.attach(LeaseId::new("shared").unwrap()));
+        assert!(poll_once(replacement.as_mut()).is_pending());
+        worker.handle(old_work, ElapsedTime::default());
+        assert_eq!(handle.waiting.len(), 1);
+        assert_eq!(worker.inventory.ready().len(), 1);
+        worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+        assert!(replacement.await.is_ok());
+        assert_eq!(handle.waiting.len(), 0);
+        assert_eq!(worker.inventory.ready().len(), 0);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unread_shared_delivery_keeps_assignment_and_late_registration_joins_it() {
+        let (runtime, mut worker, mut inbox) = manual_manager(2, 0);
+        let handle = runtime.handle();
+        let lease = LeaseId::new("shared").unwrap();
+        let mut first = Box::pin(handle.attach(lease.clone()));
+        assert!(poll_once(first.as_mut()).is_pending());
+        worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+        assert_eq!(handle.waiting.len(), 0);
+        assert_eq!(worker.inventory.ready().len(), 1);
+
+        // A caller may have missed the active registry just before publication,
+        // then register a new pending generation just after publication.
+        let (late, work) = handle.waiting.register(lease.clone());
+        drop(first); // Unread success must not free the database or remove `late`.
+        assert_eq!(handle.waiting.len(), 1);
+        worker.handle(work.unwrap(), ElapsedTime::default());
+        let Reply::Attached(late) = late.await.unwrap() else { panic!("expected session") };
+        let direct = handle.attach(lease).await.unwrap();
+        assert_eq!(late.database_id, direct.database_id);
+        assert_eq!(late.target, direct.target);
+        assert_eq!(worker.inventory.ready().len(), 1);
+        assert_eq!(handle.waiting.len(), 0);
+        runtime.shutdown().await;
+        assert!(late.cancellation_token().is_cancelled());
+        assert!(direct.cancellation_token().is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_pending_callers_share_one_work_item_and_one_database() {
+        let (runtime, mut worker, mut inbox) = manual_manager(1, 0);
+        let barrier = Arc::new(tokio::sync::Barrier::new(33));
+        let mut callers = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let handle = runtime.handle();
+            let barrier = barrier.clone();
+            callers.spawn(async move {
+                let mut future = Box::pin(handle.attach(LeaseId::new("shared").unwrap()));
+                assert!(poll_once(future.as_mut()).is_pending());
+                barrier.wait().await;
+                future.await.unwrap()
+            });
+        }
+        barrier.wait().await;
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(worker.waiting_len(), 1);
+        worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
+        let sessions =
+            tokio::time::timeout(Duration::from_secs(3), callers.join_all()).await.unwrap();
+        assert_eq!(sessions.len(), 32);
+        assert!(sessions.iter().all(|session| session.database_id == sessions[0].database_id));
+        assert!(sessions.iter().all(|session| Arc::ptr_eq(&session.target, &sessions[0].target)));
+        assert_eq!(worker.waiting_len(), 0);
+        assert!(inbox.is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_attaches_share_one_message_and_published_attaches_bypass_inbox() {
         for timeout_ms in [0, 30_000] {
             let (runtime, mut worker, mut inbox) = manual_manager(2, timeout_ms);
             let handle = runtime.handle();
@@ -615,14 +735,18 @@ mod tests {
             tokio::pin!(first, queued);
             assert!(poll_once(first.as_mut()).is_pending());
             assert!(poll_once(queued.as_mut()).is_pending());
-            assert_eq!(inbox.len(), 2);
+            assert_eq!(inbox.len(), 1);
+            assert_eq!(handle.waiting.len(), 1);
             worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
             let Poll::Ready(Ok(first)) = poll_once(first.as_mut()) else {
                 panic!("first attach must finish")
             };
-            assert!(poll_once(queued.as_mut()).is_pending());
+            let Poll::Ready(Ok(queued)) = poll_once(queued.as_mut()) else {
+                panic!("one reply must resolve both shared callers")
+            };
+            assert_eq!(handle.waiting.len(), 0);
 
-            // Publication must allow reads even with an earlier miss queued.
+            // Published joins no longer need registration or a manager message.
             for _ in 0..100 {
                 let direct = handle.attach(lease.clone());
                 tokio::pin!(direct);
@@ -632,11 +756,7 @@ mod tests {
                 assert_eq!(direct.database_id, first.database_id);
                 assert!(Arc::ptr_eq(&direct.target, &first.target));
             }
-            assert_eq!(inbox.len(), 1);
-            worker.handle(inbox.try_recv().unwrap(), ElapsedTime::default());
-            let Poll::Ready(Ok(queued)) = poll_once(queued.as_mut()) else {
-                panic!("queued attach must join")
-            };
+            assert!(inbox.is_empty());
             assert_eq!(queued.database_id, first.database_id);
             assert_eq!(worker.inventory.ready().len(), 1);
 
@@ -681,7 +801,7 @@ mod tests {
             ManagerMessage::AttachOrJoin {
                 lease: lease.clone(),
                 reply,
-                message_time: ElapsedTime::default(),
+                waiting_generation: u64::MAX,
             },
             ElapsedTime::default(),
         );
@@ -693,7 +813,7 @@ mod tests {
             ManagerMessage::AttachOrJoin {
                 lease: lease.clone(),
                 reply,
-                message_time: ElapsedTime::default(),
+                waiting_generation: u64::MAX,
             },
             ElapsedTime::default(),
         );
@@ -720,7 +840,7 @@ mod tests {
             ManagerMessage::AttachOrJoin {
                 lease: lease.clone(),
                 reply,
-                message_time: ElapsedTime::default(),
+                waiting_generation: u64::MAX,
             },
             ElapsedTime::default(),
         );
@@ -776,7 +896,7 @@ mod tests {
                 ManagerMessage::AttachOrJoin {
                     lease: lease.clone(),
                     reply,
-                    message_time: ElapsedTime::default(),
+                    waiting_generation: u64::MAX,
                 },
                 ElapsedTime::default(),
             );
@@ -811,7 +931,7 @@ mod tests {
             .send(ManagerMessage::AttachOrJoin {
                 lease: LeaseId::new("a").unwrap(),
                 reply: tx,
-                message_time: ElapsedTime::default(),
+                waiting_generation: u64::MAX,
             })
             .unwrap();
         loop {
@@ -839,7 +959,7 @@ mod tests {
             .send(ManagerMessage::AttachOrJoin {
                 lease: LeaseId::new("lost").unwrap(),
                 reply: tx,
-                message_time: ElapsedTime::default(),
+                waiting_generation: u64::MAX,
             })
             .unwrap();
         assert!(handle.attach(LeaseId::new("live").unwrap()).await.is_ok());

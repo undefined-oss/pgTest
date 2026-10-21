@@ -143,7 +143,7 @@ fn release_without_assignment_leaves_waiters_pending() {
     }
     finish_creations(&mut r);
     assert_eq!(attached(&r, a), attached(&r, b));
-    assert!(r.snapshot().waiters().is_empty());
+    assert_eq!(r.snapshot().waiting_len(), 0);
     assert!(r.active_cleanups().is_empty());
 }
 #[test]
@@ -341,12 +341,71 @@ fn expired_waiters_do_not_consume_supply() {
     r.advance_by(Duration::from_secs(31));
     finish_creations(&mut r);
     assert!(r.snapshot().leases().is_empty());
-    assert!(r.snapshot().waiters().is_empty());
+    assert_eq!(r.snapshot().waiting_len(), 0);
     assert!(matches!(
         r.reply(request),
         ReplySlot::Delivered(ConsumerReply::AttachRejected(AttachError::TimedOut))
     ));
 }
+
+#[test]
+fn caller_deadlines_remove_waiting_state_without_manager_or_creation_progress() {
+    let mut r = ready(config(0, 0, 0));
+    let first = r.attach("shared");
+    pump(&mut r);
+    r.advance_by(Duration::from_secs(15));
+    let second = r.attach("shared");
+    assert_eq!(r.snapshot().waiting_len(), 1);
+    r.advance_by(Duration::from_secs(15));
+    assert!(matches!(
+        r.reply(first),
+        ReplySlot::Delivered(ConsumerReply::AttachRejected(AttachError::TimedOut))
+    ));
+    assert!(matches!(r.reply(second), ReplySlot::Pending));
+    assert_eq!(r.snapshot().waiting_len(), 1);
+    r.advance_by(Duration::from_secs(15));
+    assert!(matches!(
+        r.reply(second),
+        ReplySlot::Delivered(ConsumerReply::AttachRejected(AttachError::TimedOut))
+    ));
+    assert_eq!(r.snapshot().waiting_len(), 0);
+}
+
+#[test]
+fn cancellation_removes_demand_before_work_is_processed_and_preserves_replacement() {
+    let mut r = ready(config(0, 0, 1));
+    let old = r.attach("same");
+    r.cancel_request(old);
+    assert_eq!(r.snapshot().waiting_len(), 0);
+    let new = r.attach("same");
+    r.step(ActorId::Manager); // Stale work must not remove the new registration.
+    assert_eq!(r.snapshot().waiting_len(), 1);
+    assert!(r.snapshot().inventory.creating().is_empty());
+    pump(&mut r);
+    assert_eq!(r.snapshot().inventory.creating().len(), 2);
+    finish_creations(&mut r);
+    attached(&r, new);
+    assert_eq!(r.snapshot().waiting_len(), 0);
+}
+
+#[test]
+fn repeated_cancelled_requests_leave_no_waiting_demand_with_timeouts_disabled() {
+    let mut cfg = config(0, 0, 1);
+    cfg.lease_claim_timeout_ms = 0;
+    let mut r = ready(cfg);
+    for index in 0..128 {
+        let request = r.attach(&format!("abandoned-{index}"));
+        r.cancel_request(request);
+        assert_eq!(r.snapshot().waiting_len(), 0);
+    }
+    let live = r.attach("live");
+    pump(&mut r);
+    assert_eq!(r.snapshot().inventory.creating().len(), 2);
+    finish_creations(&mut r);
+    attached(&r, live);
+    assert_eq!(r.snapshot().leases().len(), 1);
+}
+
 #[test]
 fn grouped_creation_results_skip_invalid_ids_and_dispatch_all_ready_supply() {
     let mut r = ready(config(0, 0, 4));
@@ -370,7 +429,7 @@ fn grouped_creation_results_skip_invalid_ids_and_dispatch_all_ready_supply() {
     assert!(r.snapshot().inventory.creating().is_empty());
     assert_eq!(r.snapshot().inventory.ready().len(), 1);
     assert_eq!(r.snapshot().inventory.ready()[0].database_id, DatabaseId(4));
-    assert!(r.snapshot().waiters().is_empty());
+    assert_eq!(r.snapshot().waiting_len(), 0);
 }
 
 #[test]
@@ -564,6 +623,10 @@ fn failed_submission_clears_reservations_without_inline_retry() {
     assert!(r.snapshot().inventory.creating().is_empty());
     assert!(r.active_creations().is_empty());
     r.attach("a");
+    pump(&mut r);
+    // Joining an existing assignment does not submit another manager command.
+    assert!(r.active_creations().is_empty());
+    r.attach("b");
     pump(&mut r);
     assert!(!r.active_creations().is_empty());
     assert!(r.active_creations().iter().all(|id| id.0 > 2));
