@@ -33,9 +33,9 @@ test:
     cargo nextest run --locked -p {{crate}} --no-fail-fast
     cargo test --locked -p {{crate}} --doc --no-fail-fast
 
-# Test all three actors with controlled clients (no Docker)
-test-runtime:
-    cargo nextest run --locked -p pgtest-core --features runtime-tests --no-fail-fast runtime::tests
+# Test creation and cleanup lifecycle workers with controlled clients (no Docker)
+test-lifecycle:
+    cargo nextest run --locked -p pgtest-core --no-fail-fast lifecycle::tests
 
 # Build and open the docs of this crate
 doc:

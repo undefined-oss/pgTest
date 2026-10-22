@@ -82,15 +82,6 @@ PostgreSQL instance.
 
 ## Install
 
-### Homebrew
-
-Install the CLI on Apple Silicon macOS or Linux (ARM64/x86_64):
-
-```sh
-brew install Afsoon/tap/pgtest
-pgtest version
-```
-
 ### Docker image
 
 The image is available at `ghcr.io/undefined-oss/pgtest` for Linux ARM64 and x86_64.
@@ -105,14 +96,6 @@ docker pull 'ghcr.io/undefined-oss/pgtest:sha-<12-character-commit>'
 Version tags such as `ghcr.io/undefined-oss/pgtest:v0.1.0` are also available. Each release
 publishes both tags for the same image.
 
-### macOS releases
-
-macOS CLI releases ship without Apple Developer ID signing or
-notarization. Depending on how the binary is downloaded, macOS may warn or block
-its first launch. If you trust the download, follow
-[Apple's instructions](https://support.apple.com/en-us/102445) to approve it in
-**System Settings → Privacy & Security → Open Anyway**, when available.
-
 ## Usage
 
 Start with an existing PostgreSQL instance and a template database containing your
@@ -125,19 +108,6 @@ cloning it. Leased application connections relay PostgreSQL authentication direc
 to the client, including password authentication. TLS is not supported on that path.
 Database management currently uses the configured user with the fixed password
 `postgres`. Use a PostgreSQL instance dedicated to tests.
-
-Choose one launch method below. Both expose PgTest on `127.0.0.1:6432`.
-
-### CLI
-
-After installing with Homebrew, start the CLI:
-
-```sh
-pgtest serve \
-  --pg-host 127.0.0.1 --pg-port 5432 \
-  --pg-user postgres --pg-database test_template \
-  --listen-addr 127.0.0.1 --listen-port 6432
-```
 
 ### Docker
 
@@ -185,21 +155,17 @@ psql 'host=127.0.0.1 port=6432 user=postgres dbname=pgtest sslmode=disable' \
 Release closes active connections for that lease and schedules its database for
 cleanup. Reusing the ID gets a fresh database. Leases also expire
 after **30 seconds** by default, measured from database assignment. For longer
-tests, increase `--lease-claim-timeout-ms` or `PGTEST_LEASE_CLAIM_TIMEOUT_MS`; `0`
+tests, increase `PGTEST_LEASE_CLAIM_TIMEOUT_MS`; `0`
 disables expiry. Run the connection and release examples within that interval.
 
-See [control SQL commands](crates/pgtest-wire/README.md#accepted-sql-commands) for
+See [control SQL commands](crates/pgtest-wire-proxy/README.md#accepted-sql-commands) for
 the supported commands and parameterized release syntax.
 
 ## Integrate
 
-See the [JavaScript / TypeScript example](example/example-js-containers/README.md)
+See the [JavaScript / TypeScript example](examples/example-js-containers/README.md)
 for a Hono API tested with Vitest and Testcontainers. It demonstrates concurrent
 test isolation, shared connections, and explicit lease cleanup through PgTest.
-
-The [Rust example](example/example-rust-cli/README.md) uses Tokio and
-`tokio-postgres`, starts PostgreSQL with Testcontainers, and builds and runs the
-native PgTest CLI automatically.
 
 ## Recommendations
 
@@ -210,8 +176,8 @@ PgTest to PostgreSQL. Unix sockets avoid the TCP connection handshake and reduce
 networking overhead. These savings can accumulate across long test suites that
 open many connections.
 
-Set `--unix-socket-dir` (or `PGTEST_UNIX_SOCKET_DIR`) for the test suite's
-connections to PgTest, and set `--pg-host` (or `PGTEST_PG_HOST`) to PostgreSQL's
+Set `PGTEST_UNIX_SOCKET_DIR` for the test suite's
+connections to PgTest, and set `PGTEST_PG_HOST` to PostgreSQL's
 absolute socket directory for upstream connections. Configure your test suite's
 PostgreSQL client to use the PgTest socket directory as its host.
 
@@ -252,7 +218,7 @@ filesystem.
 
 ### Size the initial database pool for test concurrency
 
-Set `--pool-initial-size` (or `PGTEST_POOL_INITIAL_SIZE`) using:
+Set `PGTEST_POOL_INITIAL_SIZE` using:
 
 ```text
 initial pool size = (test parallelism × test concurrency) + ready database buffer
@@ -268,8 +234,7 @@ calls for an initial pool size of `48`.
 
 ### Tune pool replenishment for subsequent batches
 
-Size `--pool-starvation-threshold` and `--pool-grow-batch-size` (or
-`PGTEST_POOL_STARVATION_THRESHOLD` and `PGTEST_POOL_GROW_BATCH_SIZE`) alongside
+Size `PGTEST_POOL_STARVATION_THRESHOLD` and `PGTEST_POOL_GROW_BATCH_SIZE` alongside
 the initial pool. Start replenishing early enough and in large enough batches
 to keep databases available as tests consume them. An adequate initial pool
 alone does not sustain a long suite; a growth batch size of `0` disables
@@ -285,7 +250,7 @@ See [Connect and release](#connect-and-release) for an example.
 
 ### Allow enough time for each lease
 
-Set `--lease-claim-timeout-ms` (or `PGTEST_LEASE_CLAIM_TIMEOUT_MS`) above the
+Set `PGTEST_LEASE_CLAIM_TIMEOUT_MS` above the
 longest expected test duration, with room for setup and teardown. For a shared
 lease, account for the entire group of tests using it. The default is **30
 seconds**, measured from database assignment; additional connections do not
@@ -317,35 +282,27 @@ contents.
 
 ## Configuration
 
-The CLI reads `serve` arguments. The server executable used by Docker reads
-environment variables. Runtime `PGTEST_*` variables and `RUST_LOG` do not configure
-the CLI.
+The server executable used by Docker reads environment variables. It supplies
+upstream defaults and always enables TCP; its Unix listener is optional.
 
-The CLI requires all four upstream arguments and at least one of `--listen-addr`
-or `--unix-socket-dir`. The server supplies upstream defaults and always enables
-TCP; its Unix listener is optional.
-
-| CLI argument                  | Server environment variable        | Default: CLI / server  | Purpose                                                                                 |
-| ----------------------------- | ---------------------------------- | ---------------------- | --------------------------------------------------------------------------------------- |
-| `--pg-host`                   | `PGTEST_PG_HOST`                   | Required / `127.0.0.1` | Upstream hostname, IP address, or absolute Unix socket directory.                       |
-| `--pg-port`                   | `PGTEST_PG_PORT`                   | Required / `5432`      | Upstream TCP port or Unix socket filename port.                                         |
-| `--pg-user`                   | `PGTEST_PG_USER`                   | Required / `postgres`  | User for database management.                                                           |
-| `--pg-database`               | `PGTEST_PG_DATABASE`               | Required / `pgtest`    | Existing template database to clone.                                                    |
-| `--listen-addr`               | `PGTEST_LISTEN_ADDR`               | Disabled / `127.0.0.1` | TCP bind IP, without a port. Docker defaults to `0.0.0.0`.                              |
-| `--listen-port`               | `PGTEST_LISTEN_PORT`               | `6432`                 | TCP listener port; `0` selects an available port.                                       |
-| `--unix-socket-dir`           | `PGTEST_UNIX_SOCKET_DIR`           | Disabled               | Existing directory for the frontend Unix socket.                                        |
-| `--unix-socket-port`          | `PGTEST_UNIX_SOCKET_PORT`          | `6432`                 | Port used in the frontend socket filename.                                              |
-| `--creation-pool-connection`  | `PGTEST_CREATION_POOL_CONNECTION`  | `10`                   | Maximum database-creation connections.                                                  |
-| `--cleanup-pool-connection`   | `PGTEST_CLEANUP_POOL_CONNECTION`   | `5`                    | Maximum database-cleanup connections.                                                   |
-| `--pool-initial-size`         | `PGTEST_POOL_INITIAL_SIZE`         | `16`                   | Initial ready databases.                                                                |
-| `--pool-starvation-threshold` | `PGTEST_POOL_STARVATION_THRESHOLD` | `8`                    | Ready-database threshold for replenishment.                                             |
-| `--pool-grow-batch-size`      | `PGTEST_POOL_GROW_BATCH_SIZE`      | `16`                   | Databases created per growth batch; `0` disables growth.                                |
-| `--lease-claim-timeout-ms`    | `PGTEST_LEASE_CLAIM_TIMEOUT_MS`    | `30000`                | Lease lifetime and pending-claim timeout, in milliseconds; `0` disables these timeouts. |
-| `--log-filter`                | `RUST_LOG`                         | `info`                 | Tracing filter, such as `info` or `debug`.                                              |
-
-A single default in the table applies to both executables. For the CLI,
-`--listen-port` requires `--listen-addr`, and `--unix-socket-port` requires
-`--unix-socket-dir`.
+| Server environment variable | Default | Purpose |
+| --- | --- | --- |
+| `PGTEST_PG_HOST` | `127.0.0.1` | Upstream hostname, IP address, or absolute Unix socket directory. |
+| `PGTEST_PG_PORT` | `5432` | Upstream TCP port or Unix socket filename port. |
+| `PGTEST_PG_USER` | `postgres` | User for database management. |
+| `PGTEST_PG_DATABASE` | `pgtest` | Existing template database to clone. |
+| `PGTEST_LISTEN_ADDR` | `127.0.0.1` | TCP bind IP, without a port. Docker defaults to `0.0.0.0`. |
+| `PGTEST_LISTEN_PORT` | `6432` | TCP listener port; `0` selects an available port. |
+| `PGTEST_CONNECTION_WORKERS` | Available CPU parallelism | Threads in the shared Pingora runtime; must be positive. |
+| `PGTEST_UNIX_SOCKET_DIR` | Disabled | Existing directory for the frontend Unix socket. |
+| `PGTEST_UNIX_SOCKET_PORT` | `6432` | Port used in the frontend socket filename. |
+| `PGTEST_CREATION_POOL_CONNECTION` | `10` | Maximum database-creation connections. |
+| `PGTEST_CLEANUP_POOL_CONNECTION` | `5` | Maximum database-cleanup connections. |
+| `PGTEST_POOL_INITIAL_SIZE` | `16` | Initial ready databases. |
+| `PGTEST_POOL_STARVATION_THRESHOLD` | `8` | Ready-database threshold for replenishment. |
+| `PGTEST_POOL_GROW_BATCH_SIZE` | `16` | Databases created per growth batch; `0` disables growth. |
+| `PGTEST_LEASE_CLAIM_TIMEOUT_MS` | `30000` | Lease lifetime and pending-claim timeout, in milliseconds; `0` disables these timeouts. |
+| `RUST_LOG` | `info` | Tracing filter, such as `info` or `debug`. |
 
 Unix sockets are supported on Linux and macOS. The frontend socket is created at
 `<directory>/.s.PGSQL.<port>`; its port is independent of both TCP ports and must
@@ -353,52 +310,49 @@ be between `1` and `65535`. The directory must already exist and be writable by
 the process. With Docker, mount the directory and account for the container's
 UID/GID `65532:65532`.
 
-### Version information
-
-Check the CLI version and the source commit used to build it:
-
-```sh
-pgtest version
-```
-
-`pgtest --version` and `pgtest -V` report the same information.
-
-See the [CLI documentation](apps/cli/README.md) for shell completion and profiling,
-and the [server documentation](apps/server/README.md) for listener details.
+See the [server documentation](apps/server/README.md) for listener details.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     Tests["Test suite<br/>PostgreSQL client"]
-
-    subgraph PgTest["PgTest — CLI or Docker"]
+    subgraph PgTest["PgTest server"]
         Server["Server<br/>SQL proxy and admin commands"]
-        Manager["Manager worker<br/>Leases and ready database pool"]
-        Creation["Database creation worker<br/>Creation PostgreSQL client pool"]
-        Cleanup["Database cleanup worker<br/>Cleanup PostgreSQL client pool"]
-
-        Server <-->|Lease requests and replies| Manager
-        Manager <-->|Creation jobs and results| Creation
-        Manager <-->|Cleanup jobs and results| Cleanup
+        Registry["Shared Papaya lease registry"]
+        Creation["Creation worker<br/>Ready inventory and creation connection pool"]
+        Cleanup["Cleanup worker<br/>Expiry and cleanup connection pool"]
+        Server -->|Read ready assignment| Registry
+        Server <-->|Attach requests and readiness| Creation
+        Server <-->|Release requests and acknowledgement| Cleanup
+        Creation -->|Insert and publish| Registry
+        Cleanup -->|Remove and cancel| Registry
     end
-
     subgraph PostgreSQL["PostgreSQL upstream"]
         Template[(Template database)]
         Leased[(Databases for leases)]
         Template -.->|Cloned into| Leased
     end
-
     Tests <-->|TCP or Unix socket| Server
     Server <-->|Lease SQL over TCP or Unix socket| Leased
     Creation -.->|Clone from| Template
     Cleanup -.->|Drop released or expired databases| Leased
 ```
 
-The manager, creation worker, and cleanup worker run as three asynchronous
-workers. The manager assigns ready databases to leases and coordinates creation
-and cleanup; the server forwards application SQL to the assigned database.
-Connections sharing a lease ID use the same database.
+One creation worker and one cleanup worker run as separate tasks and
+serve one global inventory of prepared databases. Creation publishes assignments;
+cleanup removes them and cancels their sessions. Connections sharing a lease ID
+use the same database. There is no manager actor.
+
+The Pingora proxy in `pgtest-wire-proxy` runs creation, cleanup, and connection
+tasks on one shared work-stealing runtime. `PGTEST_CONNECTION_WORKERS` sets the
+runtime's worker count.
+Lease ownership stays with the creation and cleanup tasks. Listeners accept connections
+only after all components initialize successfully. The reserved `pgtest` database
+serves control SQL using the same lease service as application connections. Established control sessions
+release their startup capacity and close when the service shuts down. The
+server executable uses `pgtest-wire-proxy::ProxyServer` for both listeners and
+database lifecycle services.
 
 Dashed arrows show database operations. Both worker connection pools connect to
 the upstream `postgres` maintenance database to execute creation and cleanup

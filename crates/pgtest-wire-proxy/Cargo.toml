@@ -1,0 +1,45 @@
+[package]
+name = "pgtest-wire-proxy"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+# Database scenarios are compiled as internal tests to use private test hosting.
+autotests = false
+description = "PostgreSQL lease proxy hosted by Pingora"
+
+[lints]
+workspace = true
+
+[dependencies]
+pgtest-core = { path = "../pgtest-core" }
+pgtest-engine-backend = { path = "../pgtest-engine-backend" }
+pgtest-database-operations = { path = "../pgtest-database-operations" }
+pingora-core = { version = "0.9.0", default-features = false }
+async-trait = "0.1.92"
+bytes = "1.12.1"
+futures = "0.3.34"
+pgwire = { version = "0.41.0", default-features = false, features = ["server-api"] }
+tokio = { workspace = true }
+tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
+tracing = { workspace = true }
+hotpath = { workspace = true }
+pest = "2.9.1"
+pest_derive = "2.9.1"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+testcontainers = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+pgtest-core = { path = "../pgtest-core", features = ["test-support"] }
+envconfig = { workspace = true }
+pgtest-database-operations = { path = "../pgtest-database-operations", features = ["test-support"] }
+tokio-postgres = "0.7.18"
+tempfile = "3"
+
+[features]
+default = []
+hotpath = ["hotpath/hotpath", "pgtest-core/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "pgtest-core/hotpath-alloc"]
+hotpath-prometheus = ["hotpath", "hotpath/hotpath-prometheus", "pgtest-core/hotpath-prometheus"]

@@ -36,10 +36,6 @@ tempfile = "3"
 name = "sql_profiling"
 required-features = ["hotpath", "test-support"]
 
-[[test]]
-name = "channel_profiling"
-required-features = ["hotpath", "test-support"]
-
 [features]
 default = []
 hotpath = ["hotpath/hotpath", "hotpath/sqlx"]

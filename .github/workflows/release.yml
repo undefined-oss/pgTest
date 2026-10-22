@@ -33,7 +33,6 @@ jobs:
       contents: write
       pull-requests: read
     outputs:
-      cli_tag: ${{ steps.apps.outputs.cli_tag }}
       server_tag: ${{ steps.apps.outputs.server_tag }}
     steps:
       - uses: actions/checkout@v7
@@ -53,22 +52,7 @@ jobs:
         env:
           RELEASES: ${{ steps.release.outputs.releases }}
         run: |
-          echo "cli_tag=$(jq -r '.[] | select(.package_name == "cli") | .tag' <<< "$RELEASES")" >> "$GITHUB_OUTPUT"
           echo "server_tag=$(jq -r '.[] | select(.package_name == "server") | .tag' <<< "$RELEASES")" >> "$GITHUB_OUTPUT"
-
-  cli:
-    needs: tags
-    if: needs.tags.outputs.cli_tag != ''
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Start cargo-dist on the released tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_TAG: ${{ needs.tags.outputs.cli_tag }}
-        run: gh workflow run cli-release.yml --repo "$GITHUB_REPOSITORY" --ref "$CLI_TAG" -f "tag=$CLI_TAG"
 
   docker:
     needs: tags

@@ -2,35 +2,42 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr, TcpListener},
+    num::{NonZeroU16, NonZeroUsize},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, ensure};
 use envconfig::Envconfig;
-use pgtest::{config::ManagerConfig, runtime::TokioRuntime};
-use pgtest_database_operations::config::PostgresConfig;
-use pgtest_pg_wire::{
-    listener_addr::ListenAddr,
-    listener_port::{SocketListenerPort, TCPListenerPort},
-    unix_socket_dir::UnixSocketDir,
-    wire_listener,
-};
+use pgtest::config::PoolConfig;
+use pgtest_database_operations::{backend::PreparedPostgres, config::PostgresConfig};
+use pgtest_wire_proxy::{Listeners, ProxyServer};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 #[derive(Envconfig)]
 struct ServerConfig {
     #[envconfig(from = "PGTEST_LISTEN_ADDR", default = "127.0.0.1")]
-    listen_addr: ListenAddr,
+    listen_addr: IpAddr,
     #[envconfig(from = "PGTEST_LISTEN_PORT", default = "6432")]
-    listen_port: TCPListenerPort,
+    listen_port: u16,
     #[envconfig(from = "PGTEST_UNIX_SOCKET_DIR")]
-    unix_socket_dir: Option<UnixSocketDir>,
+    unix_socket_dir: Option<PathBuf>,
     #[envconfig(from = "PGTEST_UNIX_SOCKET_PORT", default = "6432")]
-    unix_socket_port: SocketListenerPort,
+    unix_socket_port: NonZeroU16,
+    #[envconfig(from = "PGTEST_CONNECTION_WORKERS")]
+    connection_workers: Option<NonZeroUsize>,
 }
 
-#[tokio::main]
+impl ServerConfig {
+    fn workers(&self) -> NonZeroUsize {
+        self.connection_workers
+            .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+    }
+}
+
 #[hotpath::main(allocator = mimalloc::MiMalloc)]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let log_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = tracing_subscriber::registry()
         // Filter console logs separately so SQL query events reach the profiler.
@@ -40,7 +47,6 @@ async fn main() -> Result<()> {
     #[cfg(feature = "hotpath")]
     let subscriber = subscriber.with(pgtest_database_operations::sql_tracing_layer());
     subscriber.init();
-    hotpath::tokio_runtime!();
 
     let server_config = ServerConfig::init_from_env().context("invalid server configuration")?;
     ensure!(
@@ -50,51 +56,62 @@ async fn main() -> Result<()> {
 
     let postgres_config =
         PostgresConfig::init_from_env().context("invalid PostgreSQL configuration")?;
-    let manager_config =
-        ManagerConfig::init_from_env().context("invalid worker engine configuration")?;
+    let pool_config = PoolConfig::init_from_env().context("invalid database pool configuration")?;
 
-    let template = postgres_config.pgtest_pg_database.clone();
-    let runtime = TokioRuntime::start(postgres_config, manager_config)
-        .await
-        .context("failed to start worker engine manager")?;
-    let engine = Arc::new(runtime.handle());
-    let tcp_listener = wire_listener::run_with_handle(
-        engine.clone(),
-        SocketAddr::new(server_config.listen_addr.into(), server_config.listen_port.get()),
-        &template,
-    )
-    .await
-    .context("failed to start wire listener")?;
-    tracing::info!(address = %tcp_listener.local_addr(), "pgtest server listening");
-
+    let workers = server_config.workers();
+    let tcp =
+        TcpListener::bind(SocketAddr::new(server_config.listen_addr, server_config.listen_port))
+            .context("failed to bind TCP listener")?;
+    let listeners = Listeners::new(tcp);
     #[cfg(unix)]
-    let unix_listener = if let Some(directory) = &server_config.unix_socket_dir {
-        let listener = wire_listener::run_unix_on_port(
-            engine.clone(),
-            directory,
-            server_config.unix_socket_port.get(),
-            &template,
-        )
-        .await
-        .context("failed to start Unix wire listener")?;
-        tracing::info!(path = %listener.path().display(), "pgtest Unix socket listening");
-        Some(listener)
+    let listeners = if let Some(directory) = &server_config.unix_socket_dir {
+        listeners
+            .bind_unix(directory, server_config.unix_socket_port)
+            .context("failed to bind Unix listener")?
     } else {
-        None
+        listeners
     };
+    // Bootstrap clients live only on this temporary runtime. Pingora creates
+    // and owns every runtime used once the server starts.
+    let (prepared, initial_databases) = {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to create PostgreSQL bootstrap runtime")?;
+        runtime.block_on(async {
+            let prepared = PreparedPostgres::prepare(postgres_config)
+                .await
+                .context("failed to prepare PostgreSQL")?;
+            let initial_databases = prepared
+                .create_initial_databases(usize::from(*pool_config.initial_slots))
+                .await
+                .context("failed to create initial databases")?;
+            Ok::<_, anyhow::Error>((prepared, initial_databases))
+        })?
+    };
+    ProxyServer::run_until(
+        prepared,
+        pool_config,
+        initial_databases,
+        listeners,
+        workers,
+        shutdown_signal(),
+    )
+    .context("Pingora server failed")
+}
 
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => result.context("failed to wait for Ctrl-C")?,
-        _ = engine.stopped() => {},
-    }
-    tracing::info!("Stopping pgtest server");
+async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
-    if let Some(listener) = unix_listener {
-        listener.shutdown().await;
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
     }
-    tcp_listener.shutdown().await;
-    runtime.shutdown().await;
-    Ok(())
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 #[cfg(test)]
@@ -106,9 +123,8 @@ mod tests {
     #[test]
     fn default_listener_stays_on_loopback() {
         let config = ServerConfig::init_from_hashmap(&HashMap::new()).unwrap();
-        assert_eq!(*config.listen_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
-        assert_eq!(config.listen_addr, ListenAddr::default());
-        assert_eq!(config.listen_port.get(), 6432);
+        assert_eq!(config.listen_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(config.listen_port, 6432);
         assert_eq!(config.unix_socket_port.get(), 6432);
     }
 
@@ -120,8 +136,8 @@ mod tests {
                 ("PGTEST_LISTEN_PORT".to_owned(), "0".to_owned()),
             ]);
             let config = ServerConfig::init_from_hashmap(&vars).unwrap();
-            assert_eq!(*config.listen_addr, address.parse::<IpAddr>().unwrap());
-            assert_eq!(config.listen_port.get(), 0);
+            assert_eq!(config.listen_addr, address.parse::<IpAddr>().unwrap());
+            assert_eq!(config.listen_port, 0);
         }
     }
 
@@ -142,9 +158,9 @@ mod tests {
             ("PGTEST_UNIX_SOCKET_PORT".to_owned(), "7432".to_owned()),
         ]);
         let config = ServerConfig::init_from_hashmap(&vars).unwrap();
-        assert_eq!(config.listen_port.get(), 8432);
+        assert_eq!(config.listen_port, 8432);
         assert_eq!(config.unix_socket_port.get(), 7432);
-        assert_eq!(config.unix_socket_dir, Some(PathBuf::from("/tmp/pgtest").into()));
+        assert_eq!(config.unix_socket_dir, Some(PathBuf::from("/tmp/pgtest")));
     }
 
     #[test]
@@ -160,6 +176,25 @@ mod tests {
         for port in ["0", "65536", "-1", "invalid", ""] {
             let vars = HashMap::from([("PGTEST_UNIX_SOCKET_PORT".to_owned(), port.to_owned())]);
             assert!(ServerConfig::init_from_hashmap(&vars).is_err(), "accepted port {port:?}");
+        }
+    }
+
+    #[test]
+    fn connection_workers_default_to_available_parallelism_and_accept_override() {
+        let config = ServerConfig::init_from_hashmap(&HashMap::new()).unwrap();
+        assert_eq!(
+            config.workers(),
+            std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+        );
+        let config = ServerConfig::init_from_hashmap(&HashMap::from([(
+            "PGTEST_CONNECTION_WORKERS".to_owned(),
+            "3".to_owned(),
+        )]))
+        .unwrap();
+        assert_eq!(config.workers().get(), 3);
+        for value in ["0", "-1", "invalid", ""] {
+            let vars = HashMap::from([("PGTEST_CONNECTION_WORKERS".to_owned(), value.to_owned())]);
+            assert!(ServerConfig::init_from_hashmap(&vars).is_err());
         }
     }
 }

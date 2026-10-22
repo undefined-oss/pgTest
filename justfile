@@ -23,9 +23,8 @@ check-profile:
     cargo check --workspace --all-targets --features hotpath
 
 # Run cargo build on the workspace members
-build version commit_sha:
-    @test -n {{quote(version)}} && test -n {{quote(commit_sha)}} || { echo 'version and commit_sha must not be empty' >&2; exit 1; }
-    PGTEST_VERSION={{quote(version)}} PGTEST_COMMIT_SHA={{quote(commit_sha)}} cargo build --workspace --all-targets
+build:
+    cargo build --workspace --all-targets
 
 # Build the local release server binary
 build-release:
@@ -47,15 +46,13 @@ docker-build-profile tag="latest":
 clean:
     cargo clean
 
-# Run workspace tests, including deterministic simulations (requires Docker)
+# Run workspace tests, including lifecycle workers (requires Docker)
 test:
-    cargo nextest run --locked -p pgtest-core --no-default-features --features test-support --no-fail-fast
-    cargo nextest run --locked --workspace --features pgtest-core/runtime-tests --no-fail-fast
+    cargo nextest run --locked --workspace --no-fail-fast
     cargo test --locked --workspace --doc --no-fail-fast
 
 mod core "crates/pgtest-core"
 mod server "apps/server"
-mod wire "crates/pgtest-wire"
+mod wire "crates/pgtest-wire-proxy"
 mod database "crates/pgtest-database-operations"
 mod utils "crates/pgtest-utils"
-mod cli "apps/cli"

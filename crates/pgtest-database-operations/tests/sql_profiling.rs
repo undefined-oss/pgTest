@@ -1,7 +1,7 @@
 use hotpath::{Format, HotpathGuardBuilder, Section};
 use pgtest_database_operations::{
-    backend::bootstrap, cleanup_worker_handle::CleanupClient,
-    creation_worker_handle::CreationClient, testcontainer::pg_container_config,
+    backend::bootstrap, cleanup_client::CleanupClient, creation_client::CreationClient,
+    testcontainer::pg_container_config,
 };
 use tracing_subscriber::{EnvFilter, prelude::*};
 

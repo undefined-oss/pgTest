@@ -41,16 +41,11 @@
 !examples/
 !examples/example-js-containers/
 !examples/example-js-containers/**
-!examples/example-rust-cli/
-!examples/example-rust-cli/**
 
 # SQL grammar
 !crates/**/*.pest
 
 # Release tooling
-!dist-workspace.toml
 !release-plz.toml
 !CHANGELOG.md
 !RELEASING.md
-!.github/dist/
-!.github/dist/*.yml

@@ -208,7 +208,7 @@ impl<'a> From<&'a Container<Postgres>> for PostgresConfig {
     }
 }
 
-/// Provision a separate template for each test manager in the shared container.
+/// Provision a separate template for each test service in the shared container.
 /// Templates and any remaining clones live until the container is removed.
 pub async fn pg_container_config() -> PostgresConfig {
     static NEXT_TEMPLATE_ID: AtomicU64 = AtomicU64::new(0);
@@ -249,8 +249,8 @@ pub async fn pg_container_config() -> PostgresConfig {
 
 #[cfg(test)]
 pub(crate) struct TestClients {
-    pub(crate) creation: crate::creation_worker_handle::CreationClient,
-    pub(crate) cleanup: crate::cleanup_worker_handle::CleanupClient,
+    pub(crate) creation: crate::creation_client::CreationClient,
+    pub(crate) cleanup: crate::cleanup_client::CleanupClient,
 }
 
 #[cfg(test)]
@@ -260,9 +260,8 @@ impl TestClients {
     ) -> Result<Self, crate::backend::BootstrapError> {
         let metadata = crate::backend::bootstrap(&config).await?;
         Ok(Self {
-            creation: crate::creation_worker_handle::CreationClient::connect(&config, metadata)
-                .await?,
-            cleanup: crate::cleanup_worker_handle::CleanupClient::connect(&config).await?,
+            creation: crate::creation_client::CreationClient::connect(&config, metadata).await?,
+            cleanup: crate::cleanup_client::CleanupClient::connect(&config).await?,
         })
     }
 
@@ -280,7 +279,7 @@ impl TestClients {
         )
         .await?;
         for name in names {
-            crate::cleanup_worker_handle::CleanupClient::drop_on_connection(&client, &name).await?;
+            crate::cleanup_client::CleanupClient::drop_on_connection(&client, &name).await?;
         }
         Ok(())
     }

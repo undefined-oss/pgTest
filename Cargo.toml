@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pgtest-core", "crates/pgtest-wire", "crates/pgtest-utils", "crates/pgtest-database-operations", "apps/cli", "apps/server", "crates/pgtest-engine-backend"]
+members = ["crates/pgtest-core", "crates/pgtest-wire-proxy", "crates/pgtest-utils", "crates/pgtest-database-operations", "apps/server", "crates/pgtest-engine-backend"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,7 +20,6 @@ anyhow = "1.0.104"
 thiserror = "2.0.20"
 tokio = { version = "1", features = ["io-util", "macros", "net", "parking_lot", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.44"
-tracing-test = "0.2.6"
 testcontainers = { version = "0.28.0", features = ["blocking"] }
 
 [profile.release]
@@ -28,6 +27,3 @@ opt-level = 3
 strip = "symbols"
 lto = "fat"
 codegen-units = 1
-
-[profile.dist]
-inherits = "release"
