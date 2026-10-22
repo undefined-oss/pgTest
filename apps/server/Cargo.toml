@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
@@ -18,8 +18,8 @@ envconfig = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-pgtest-core = { version = "=0.1.0", path = "../../crates/pgtest-core" }
-pgtest-database-operations = { version = "=0.1.0", path = "../../crates/pgtest-database-operations" }
+pgtest-core = { version = "=0.2.0", path = "../../crates/pgtest-core" }
+pgtest-database-operations = { version = "=0.2.0", path = "../../crates/pgtest-database-operations" }
 
 pgtest-wire-proxy = { path = "../../crates/pgtest-wire-proxy" }
 
