@@ -2,12 +2,14 @@
 use std::num::NonZeroUsize;
 
 use deadpool_postgres::Client;
-use pgtest_engine_backend::PgEndpoint;
+use futures_util::{StreamExt, stream};
+use pgtest_engine_backend::{BackendError, DatabaseCreator, PgEndpoint, ProvisionedDatabase};
 
 use crate::{
-    cleanup_worker_handle::CleanupClient,
+    cleanup_client::CleanupClient,
     config::PostgresConfig,
     connection::{connect_pool, discover_stale},
+    creation_client::CreationClient,
     errors::PostgresClientError,
     sql_profile,
 };
@@ -24,6 +26,8 @@ pub enum BootstrapError {
     Postgres(#[from] PostgresClientError),
     #[error("bootstrap connection failed: {0}")]
     Connection(String),
+    #[error("initial database creation failed: {0}")]
+    InitialDatabaseCreation(#[from] BackendError),
 }
 
 struct BootstrapClient {
@@ -105,17 +109,56 @@ pub async fn bootstrap(config: &PostgresConfig) -> Result<PostgresMetadata, Boot
     Ok(PostgresMetadata { version, template, endpoint })
 }
 
+/// Cloneable configuration and metadata, with no live connections or pools.
+/// Prepare once before starting services for this template; clones can be sent
+/// to independent worker runtimes without repeating stale-database cleanup.
+#[derive(Clone)]
 pub struct PreparedPostgres {
     pub config: PostgresConfig,
     pub metadata: PostgresMetadata,
 }
 
 impl PreparedPostgres {
+    /// Validate PostgreSQL and clean stale databases before any service starts.
+    /// Re-running this for a live template can remove another service's clones.
     pub async fn prepare(config: PostgresConfig) -> Result<Self, BootstrapError> {
         let metadata = bootstrap(&config).await?;
         Ok(Self { config, metadata })
     }
+
+    /// Create initial supply before starting Pingora. The temporary client is
+    /// dropped here; only database descriptors are transferred to workers.
+    /// This does not repeat stale-database cleanup.
+    pub async fn create_initial_databases(
+        &self,
+        amount: usize,
+    ) -> Result<Vec<ProvisionedDatabase>, BootstrapError> {
+        if amount == 0 {
+            return Ok(Vec::new());
+        }
+        let client = CreationClient::connect(&self.config, self.metadata.clone()).await?;
+        let limit = self.config.pgtest_pg_creation_pool_connection.into();
+        Ok(create_initial_databases(&client, amount, limit).await?)
+    }
 }
+
+/// Bootstrap the full batch with bounded concurrency, including when an
+/// operation fails. Dropping this future drops all pending local operations.
+pub async fn create_initial_databases<C: DatabaseCreator>(
+    client: &C,
+    amount: usize,
+    limit: NonZeroUsize,
+) -> Result<Vec<ProvisionedDatabase>, BackendError> {
+    let results = stream::iter(0..amount)
+        .map(|_| client.create_database())
+        .buffer_unordered(limit.get())
+        .collect::<Vec<_>>()
+        .await;
+    results.into_iter().collect()
+}
+
+#[cfg(test)]
+mod initial_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,4 @@
-//! Configuration for Manager inventory growth and lease timeouts.
+//! Configuration for global inventory growth and lease timeouts.
 
 use derive_more::{Deref, Display, From, FromStr, Into};
 use envconfig::Envconfig;
@@ -31,7 +31,7 @@ impl Default for GrowBatchSize {
 }
 
 #[derive(Envconfig, Debug, Clone, Copy)]
-pub struct ManagerConfig {
+pub struct PoolConfig {
     #[envconfig(from = "PGTEST_POOL_INITIAL_SIZE", default = "16")]
     pub initial_slots: InitialSlots,
     #[envconfig(from = "PGTEST_POOL_STARVATION_THRESHOLD", default = "8")]
@@ -44,7 +44,7 @@ pub struct ManagerConfig {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl Default for ManagerConfig {
+impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             initial_slots: 4.into(),
@@ -64,7 +64,7 @@ mod config_tests {
 
     #[test]
     fn pool_settings_defaults_and_bounds_match_configuration() {
-        let config = ManagerConfig::init_from_hashmap(&HashMap::new()).unwrap();
+        let config = PoolConfig::init_from_hashmap(&HashMap::new()).unwrap();
         assert_eq!(config.initial_slots, InitialSlots::default());
         assert_eq!(config.starvation_threshold, StarvationThreshold::default());
         assert_eq!(config.grow_batch_size, GrowBatchSize::default());
@@ -76,10 +76,10 @@ mod config_tests {
         ] {
             for invalid in ["-1", "65536", "invalid"] {
                 let vars = HashMap::from([(variable.to_owned(), invalid.to_owned())]);
-                assert!(ManagerConfig::init_from_hashmap(&vars).is_err(), "{variable}={invalid}");
+                assert!(PoolConfig::init_from_hashmap(&vars).is_err(), "{variable}={invalid}");
             }
             let vars = HashMap::from([(variable.to_owned(), "65535".to_owned())]);
-            assert!(ManagerConfig::init_from_hashmap(&vars).is_ok(), "{variable}=65535");
+            assert!(PoolConfig::init_from_hashmap(&vars).is_ok(), "{variable}=65535");
         }
     }
 
@@ -94,7 +94,7 @@ mod config_tests {
         .into_iter()
         .map(|key| (key.to_owned(), "0".to_owned()))
         .collect();
-        let config = ManagerConfig::init_from_hashmap(&vars).unwrap();
+        let config = PoolConfig::init_from_hashmap(&vars).unwrap();
         assert_eq!(*config.initial_slots, 0);
         assert_eq!(*config.starvation_threshold, 0);
         assert_eq!(*config.grow_batch_size, 0);

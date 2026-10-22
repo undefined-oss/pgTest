@@ -1,180 +1,122 @@
 # pgtest-core
 
-The Manager actor owns leases and inventory in this crate. Creation and Cleanup
-actors live in `pgtest-database-operations`; their synchronous state transitions
-live in `pgtest-engine-backend` and are shared by the deterministic simulator and
-Tokio workers. Mailboxes are unbounded; active provider operations are limited by
-the configured creation and cleanup concurrency.
+One creation worker and one cleanup worker serve every connection worker.
+Each lifecycle worker owns its administrative PostgreSQL connection pool. The
+Pingora host runs creation, cleanup, and connections on one shared runtime.
+There is no
+manager actor, lease-owner routing, or manager completion queue.
 
-`pgtest-engine-backend` defines resource identities, connection targets, worker
-messages, and synchronous scheduling states. It has no Tokio dependency.
-The `tokio-runtime` feature enables PostgreSQL operations and concrete worker
-handles. The CLI and server call `TokioRuntime::start(postgres_config, manager_config)`;
-the wire receives a `ManagerHandle` and the configured template name. It validates
-the startup database before sending an attach request, then uses the returned
-`LeaseSession.target`. Manager receives lease IDs without template names.
+`LifecycleWorkers` supplies the creation and cleanup futures and a cloneable
+`LeaseService` with `attach`, `release`, and `stopped`. This crate does not own
+production threads or runtimes. PostgreSQL preparation and service hosting live
+at the application boundary.
 
-Pending attachments share one assignment future per lease ID. A concurrent Papaya
-registry stores weak references to those futures; callers own strong clones and
-their individual request deadlines. The first registration sends one allocation
-work item containing the oneshot sender to Manager. One reply wakes all subscribers.
-Dropping the last subscriber closes the receiver and removes the registration
-directly, even when Manager or database creation is stalled. Generation checks
-prevent delayed cleanup from removing a newer registration for the same lease ID.
+`PoolConfig` configures the shared database inventory. Pingora connection
+workers use the `LeaseService` API for application and control requests.
 
-Manager uses the registry size for distinct waiting demand, without scanning
-requests. Its allocation-work deque retains senders only; abandoned work is skipped
-once when consumed and does not contribute to demand. Active lease joins retain
-their direct shared-map lookup. `futures_util::Shared` synchronizes subscribers
-within each lease; the waiting registry has no global mutex.
+## Hosting the workers
 
-With `hotpath` enabled, registry registration, counting, removal, receiver polling,
-and drop cleanup have function measurements. The `waiting_registry::*` block
-labels separate weak-reference upgrades, stale removal, assignment creation, and
-insertion. `manager_handle::submit_assignment` and
-`manager_worker::send_assignment` measure submission and reply delivery;
-`manager_handle::wait_assignment` tracks each caller's shared-future lifecycle,
-including suspension and cancellation. These probes compile out when profiling
-is disabled.
+`LifecycleWorkers::new(pool_config, initial_databases, stop)` separates the lifecycle from its
+thread launcher. It returns a shared `service` handle and two owned workers,
+`creation` and `cleanup`, without starting threads or connecting to PostgreSQL.
+It seeds the shared inventory with databases already created during application
+bootstrap. The lease registry starts empty; clients supply lease IDs on attach.
 
-The deterministic simulator models subscribers and reply ownership using test-only
-request IDs. `ManagerIO` supplies pending-demand counts, receiver liveness, and
-generation-aware cleanup without adding Tokio to the synchronous message handler.
+Each worker's `run(initialize, concurrency_limit, ready_sender)` consumes that
+worker. The initialization future builds its database client on the runtime polling the
+worker. Both workers send readiness after their clients initialize and report startup errors through the
+readiness channel. The host must wait for both successful readiness results
+before admitting connections.
 
-## Layout
+The host cancels the shared token to shut down. Once running, a worker exiting,
+panicking, or having its future dropped also cancels that token to stop its
+sibling and invalidate lease sessions. The host remains responsible for awaiting
+both worker futures during shutdown.
 
-```text
-src/
-├── lib.rs
-├── config.rs
-├── runtime.rs
-├── manager_handle.rs
-├── manager_handle/
-│   ├── manager_worker.rs
-│   ├── messages.rs
-│   ├── database_inventory.rs
-│   ├── lease.rs
-│   ├── waiting.rs
-│   ├── errors.rs
-│   └── tests.rs
-└── simulation.rs
-```
+The server application uses `ProxyServer`, which hosts creation and cleanup
+through `ServiceBuilder` in
+[`pgtest-wire-proxy/src/services.rs`](../pgtest-wire-proxy/src/services.rs).
+Pingora runs creation, cleanup, and connection tasks on one work-stealing runtime.
+Clients initialize there before connections are accepted. `PGTEST_CONNECTION_WORKERS`
+sets the shared worker count. The host checks both initialization results before
+reporting readiness and preserves the underlying error if startup fails.
 
-Manager treats Creation and Cleanup as message endpoints. Their database-operation
-implementations and connections stay in `pgtest-database-operations`; the runtime
-constructs and connects them. `ManagerIO` is a statically dispatched testing seam
-beside Manager, and `TokioPorts` is its crate-private production implementation.
-There is no runtime selection or dynamic dispatch. `simulation.rs` is private
-and compiled only for this crate's unit tests.
+Application bootstrap calls `prepared.create_initial_databases(initial_slots)`
+before starting Pingora. It waits for the complete batch and transfers only
+database descriptors; the temporary bootstrap client is dropped before worker
+clients open on the shared runtime.
 
-## Deterministic runtime
+The synchronous server calls `ProxyServer::run_until` with a shutdown future.
+Shutdown during startup cancels both lifecycle workers. Core tests run creation
+and cleanup futures directly on the test runtime and explicitly await their
+shutdown.
 
-Disable default features to run the private deterministic simulator tests
-without Tokio, an executor, futures, threads, or a wall clock:
+## Responsibilities
 
-```sh
-cargo nextest run -p pgtest-core --no-default-features --features test-support
-cargo tree -p pgtest-core --no-default-features --features test-support
-```
+| Component | Owns |
+|---|---|
+| Application bootstrap | Initial database creation before Pingora starts |
+| Creation worker | Ready inventory, pending requests and waiters, creation reservations, assignment, registry publication, replenishment |
+| Cleanup worker | Release, expiry, registry removal, session cancellation, physical deletion, failed retirement records |
+| Connection worker | Client/upstream sockets, startup parsing, waiting for assignment, byte relay |
+| Papaya registry | Lease ID to completed, immutable assignment; no pending state or core-owner metadata |
 
-The driver has FIFO actor mailboxes. `step(ActorId)` delivers one message;
-`run_until_idle(max_steps)` uses fixed round-robin scheduling and returns a trace
-on step-limit exhaustion. Neither operation advances time or completes provider
-calls. `advance_by` advances virtual time, expires caller deadlines, and enqueues
-lease timers ordered by deadline and insertion sequence.
+Ready attaches read a published session without messaging a lifecycle worker.
+Missing attaches send requests to creation, which groups waiters by lease ID in
+its local state. Each caller awaits its own reply with an independent timeout.
+Disconnecting or timing out closes that reply and wakes creation to prune
+cancelled waiters. Other callers for the same lease remain pending.
 
-```rust,ignore
-let mut runtime = SimRuntime::new(config);
-runtime.run_until_idle(100)?;
-for id in runtime.active_creations() {
-    runtime.complete_creation(id, Ok(database_fixture(id)));
-}
-runtime.run_until_idle(100)?;
-let request = runtime.attach("test-a");
-runtime.run_until_idle(100)?;
-let reply = runtime.reply(request);
-```
+Creation records a batch only after every operation finishes. It assigns ready
+inventory by sending replies first. If at least one send succeeds, creation
+publishes the complete immutable entry into Papaya, then removes pending tracking.
+If every send fails, the database returns to available inventory without publication.
+A successful send commits the assignment even if the receiver disconnects before
+consuming it. Requests that miss publication queue behind dispatch and recheck the
+registry. No pending entry, waiter count, or per-entry mutex exists in the registry.
+Only creation can publish; only cleanup can remove. Cleanup conditionally
+removes the exact assignment, so a delayed release or timer cannot affect a
+replacement using the same lease ID. No map guard crosses an await.
 
-Tests explicitly complete active creations and deletions, discard requests or
-sessions, inject stale messages, fail submissions, close actor mailboxes, and
-inspect inventory. Quiescence does not imply startup or pending operations have
-completed. The same shared worker transitions enforce execution windows in both
-runtimes. PostgreSQL bootstrap and stale-database discovery are tested in
-`pgtest-database-operations`, outside the Manager state machine.
+## Release, expiry, and shutdown
 
-## Tokio runtime
+Disconnecting does not release a published assignment. Explicit release closes
+both pending and ready leases, cancels sessions, and acknowledges logical removal
+before physical deletion finishes. Pending waiters receive `LeaseClosed`. Late
+provisioning results remain available inventory rather than reviving the old lease.
+Release of a published lease goes directly to cleanup. If the registry lookup
+misses, release is ordered through creation alongside pending attaches. Creation
+either cancels its pending waiters or forwards an assignment published in the
+meantime to cleanup. An unknown lease is a no-op and does not trigger growth.
+Reusing a released ID creates a new assignment.
 
-`runtime.rs` owns initialization, worker wiring, and shutdown.
-`manager_handle.rs` contains the caller-facing Tokio API.
-`manager_handle/manager_worker.rs` contains the shared synchronous message handler,
-its `ManagerIO` testing interface, and the private Tokio adapter and receive loop.
-Lease types live in `manager_handle/lease.rs`; configuration lives in `config.rs`.
-Runtime tests live in `runtime.rs` and deterministic behavior tests in
-`manager_handle/tests.rs`.
+`PGTEST_LEASE_CLAIM_TIMEOUT_MS` retains its existing dual meaning: each attach's
+wait deadline and the lifetime starting at publication. Zero disables both.
+All inventory and administrative pool settings apply once to the service,
+not once per connection worker. Growth preserves batch sizing and the inclusive
+starvation threshold. A creation batch becomes available after all its outcomes
+arrive. Startup failure likewise waits for its full batch.
 
-`TokioRuntime::start(PostgresConfig, ManagerConfig)` bootstraps PostgreSQL,
-initializes Creation and Cleanup concurrently through their concrete handle
-constructors, awaits initial database creation, and then spawns Manager. Each
-actor has its own unbounded inbox. Worker results, wire requests and timer messages go directly to Manager's
-inbox. There is no additional completion channel or forwarding task.
+Cleanup has independent concurrency. Failed deletions retain their resource
+identity and are not returned to ready inventory or automatically retried.
+Unexpected worker exit cancels the service. Shutdown cancels pending operations
+and sessions. The synchronous host returns after Pingora shuts down its runtime.
+Cancelling a provider future does not guarantee that PostgreSQL cancelled a
+command already submitted. The next bootstrap reconciles stale databases.
 
-Manager stores concrete `CreationHandle` and `CleanupHandle` values. The three
-actors are independently spawned with `tokio::spawn`; `TaskTracker` is used only
-for explicit shutdown. There is no supervisor, task-error aggregation, or automatic
-sibling cancellation when a worker exits.
+## Tests
 
-`runtime.handle()` returns a cloneable handle. Keep the runtime alive while
-listeners serve connections. `runtime.shutdown().await` sends `Shutdown` to the
-Manager inbox, cancels the shared token, and waits for actors and timers; it
-returns `()`. Dropping the runtime also sends `Shutdown` and signals cancellation.
-Manager processes its inbox with a receive loop. `ManagerHandle::stopped()` waits
-for that inbox to close.
-
-Creation processes batches in order with concurrent operations inside each
-batch; Cleanup uses its own execution window. Each operation is attempted once,
-and each result is reported separately. Failed cleanup retains retirement
-identity and never returns a resource to available supply.
+Pingora owns the shared service runtime; the operating system schedules its
+threads onto CPUs. Pool clients and connection sessions run on that runtime.
 
 ```sh
-cargo nextest run -p pgtest-core --features runtime-tests
+cargo test -p pgtest-core --lib
 ```
 
-These tests cover all three actors with controlled clients, including reply
-ownership, concurrency, timers, cancellation, and simulator parity. Helpers for
-injecting clients are compiled only for tests or the explicit `test-support`
-feature. PostgreSQL integration tests in `pgtest-wire` and
-`pgtest-database-operations` require Docker.
+Controlled providers exercise worker tasks, concurrent connection
+runtimes, readiness, cancellation, expiry, assignment races, and shutdown without
+PostgreSQL. They also cover creation concurrency and whole-batch publication.
+PostgreSQL integration tests require Docker.
 
-## Lifecycle guarantees
-
-Bootstrap validates PostgreSQL and removes stale databases on one temporary
-connection, closes it, and returns configuration and metadata. Bootstrap cleanup
-failures warn and permit startup to continue; validation failures stop startup.
-Each handle initializes its independent pool before spawning its actor. A
-constructor failure cancels and waits for any worker already started. Dropping
-a pending startup future signals cancellation through the runtime owner.
-
-The runtime requests an initial batch through Creation's inbox and awaits its
-results through the existing Manager inbox before spawning Manager with the
-populated inventory. Manager has no startup tracking or readiness notification.
-Startup returns immediately on the first creation error and cancels remaining
-work. Successful resources remain for the next bootstrap. The deterministic
-runtime simulates this startup phase before dispatching messages to Manager and
-exposes its startup result directly.
-
-Connections sharing an open lease share its database. Disconnecting keeps
-the assignment; leases do not track connection counts. Explicit release removes
-the current assignment, cancels its sessions, and acknowledges removal before
-deletion finishes. Release is a no-op when no assignment exists, including while
-an attach request is waiting for a database. Release and expiry both permit a fresh
-assignment with the same ID. The claim-timeout setting still also
-controls lease lifetime; zero disables both deadlines.
-
-Creation and Cleanup discard queued work and drop active operation futures on
-cancellation. Manager stops when it receives `Shutdown`, discarding later messages.
-Already submitted provider commands may still finish remotely. Closed mailboxes return submission
-errors; worker panics are not monitored or propagated by a supervisor.
-
-Applications compose `runtime::TokioRuntime`, `config::ManagerConfig`, and
-`manager_handle::ManagerHandle`. Per-database upstream connection pools,
-profiling runs, Xata authentication, and TLS remain separate follow-up work.
+With `hotpath`, the `creation` and `cleanup` request queues are profiled. There is
+no manager queue. Ready joins produce no creation request.

@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use crate::{BackendError, ProvisionedDatabase, ResourceId};
+use crate::{BackendError, ProvisionedDatabase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DatabaseId(pub u64);
@@ -24,26 +24,7 @@ impl CreateDatabases {
 }
 
 #[derive(Clone, Debug)]
-pub struct CleanupDatabase {
-    pub database_id: DatabaseId,
-    pub resource_id: ResourceId,
-}
-
-#[derive(Clone, Debug)]
 pub struct CreationResult {
     pub database_id: DatabaseId,
     pub result: Result<ProvisionedDatabase, BackendError>,
-}
-
-#[derive(Clone, Debug)]
-pub enum DatabaseWorkerMessages {
-    /// All outcomes for one completed CreateDatabases request, in completion
-    /// order.
-    CreationsFinished {
-        results: Vec<CreationResult>,
-    },
-    CleanupFinished {
-        database_id: DatabaseId,
-        result: Result<(), BackendError>,
-    },
 }

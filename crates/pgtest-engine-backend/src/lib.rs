@@ -1,4 +1,4 @@
-//! Provider-neutral database lifecycle contract and synchronous worker states.
+//! Provider-neutral database lifecycle contracts and operation identities.
 use std::{future::Future, path::PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -44,8 +44,3 @@ pub trait DatabaseCleaner: Send + Sync + 'static {
 }
 
 pub mod jobs;
-pub mod workers;
-
-#[derive(Debug, thiserror::Error)]
-#[error("database worker is unavailable")]
-pub struct WorkerUnavailable;
