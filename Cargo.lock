@@ -2101,7 +2101,7 @@ dependencies = [
 
 [[package]]
 name = "pgtest-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "derive_more",
  "envconfig",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "pgtest-database-operations"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "deadpool-postgres",
  "derive_more",
@@ -2143,14 +2143,14 @@ dependencies = [
 
 [[package]]
 name = "pgtest-engine-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "pgtest-utils"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "derive_more",
  "thiserror",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "pgtest-wire-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "envconfig",
