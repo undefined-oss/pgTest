@@ -16,8 +16,12 @@ server when it depends on them. Nothing is published to crates.io.
 2. Merging the PR into `main` automatically starts **Publish**, which runs nextest
    and doctests when that PR changes `.rs` files. The PR must come from a
    `release-plz-*` branch in this repository.
-3. Release-plz creates the pending `server-v<version>` and
-   `internals-v<version>` tags. The internal tag is a version baseline only.
+3. Release-plz creates the pending `server-v<version>` and internal baseline
+   tags. Core, database operations, and utils use `internals-v<version>`;
+   wire-proxy and engine-backend use `pgtest-wire-proxy-v<version>` and
+   `pgtest-engine-backend-v<version>`. These internal tags do not create GitHub
+   releases. The newer packages need their own tag histories because they do
+   not exist under their current names at the original shared baseline.
 4. Server releases are published as Docker images, compiled on native Linux
    AMD64 and ARM64 runners from the released tag.
 
