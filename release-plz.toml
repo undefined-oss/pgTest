@@ -16,7 +16,7 @@ git_release_enable = true
 git_tag_name = "server-v{{ version }}"
 changelog_update = true
 changelog_path = "apps/server/CHANGELOG.md"
-changelog_include = ["pgtest-core", "pgtest-wire-proxy", "pgtest-database-operations", "pgtest-utils"]
+changelog_include = ["pgtest-core", "pgtest-wire-proxy", "pgtest-database-operations", "pgtest-engine-backend", "pgtest-utils"]
 
 [[package]]
 name = "pgtest-core"
@@ -24,11 +24,18 @@ git_tag_enable = true
 git_tag_name = "internals-v{{ version }}"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-changelog_include = ["pgtest-wire-proxy", "pgtest-database-operations", "pgtest-utils"]
+changelog_include = ["pgtest-wire-proxy", "pgtest-database-operations", "pgtest-engine-backend", "pgtest-utils"]
 
 [[package]]
 name = "pgtest-wire-proxy"
-git_tag_name = "internals-v{{ version }}"
+# The shared tag predates this package name; start a separate baseline.
+git_tag_enable = true
+git_tag_name = "pgtest-wire-proxy-v{{ version }}"
+
+[[package]]
+name = "pgtest-engine-backend"
+git_tag_enable = true
+git_tag_name = "pgtest-engine-backend-v{{ version }}"
 
 [[package]]
 name = "pgtest-database-operations"
