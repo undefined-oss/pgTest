@@ -6,6 +6,16 @@ on:
       source_sha:
         type: string
         required: true
+    secrets:
+      KACHE_R2_ENDPOINT:
+        description: R2 S3 endpoint for the kache build cache remote
+        required: false
+      KACHE_R2_ACCESS_KEY_ID:
+        description: R2 access key ID for the kache build cache remote
+        required: false
+      KACHE_R2_SECRET_ACCESS_KEY:
+        description: R2 secret access key for the kache build cache remote
+        required: false
   pull_request:
     types: [opened, synchronize, reopened]
   push:

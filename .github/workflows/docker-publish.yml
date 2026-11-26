@@ -15,6 +15,16 @@ on:
         description: Publish per-PR nightly tags (nightly-pr-sha) instead of the rolling nightly tags
         type: boolean
         default: false
+    secrets:
+      KACHE_R2_ENDPOINT:
+        description: R2 S3 endpoint for the kache build cache remote
+        required: false
+      KACHE_R2_ACCESS_KEY_ID:
+        description: R2 access key ID for the kache build cache remote
+        required: false
+      KACHE_R2_SECRET_ACCESS_KEY:
+        description: R2 secret access key for the kache build cache remote
+        required: false
 
 permissions:
   contents: read
