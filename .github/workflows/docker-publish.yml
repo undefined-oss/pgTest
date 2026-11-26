@@ -130,6 +130,10 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
           save-cache: true
+          # The pr-<N> namespace is small, and per-key R2 round-trips dominate
+          # restore time (avg ~565 ms/hit vs 25 s of actual transfer). Bulk-pull
+          # the namespace at setup instead of fetching keys during the build.
+          sync: true
           cache-key-prefix: docker-release-${{ matrix.target }}
           pr-comment: false
       - name: Compile and stage static server
