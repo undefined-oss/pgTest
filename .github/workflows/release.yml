@@ -23,6 +23,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: read # The reusable Tests workflow needs PR read access.
+    secrets:
+      # Reusable workflows do not inherit repository secrets; pass the R2
+      # cache configuration explicitly.
+      KACHE_R2_ENDPOINT: ${{ secrets.KACHE_R2_ENDPOINT }}
+      KACHE_R2_ACCESS_KEY_ID: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
+      KACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
     with:
       source_sha: ${{ github.event.pull_request.merge_commit_sha }}
 
@@ -62,6 +68,12 @@ jobs:
     permissions:
       contents: read
       packages: write # Publish the release image to ghcr.io.
+    secrets:
+      # Reusable workflows do not inherit repository secrets; pass the R2
+      # cache configuration explicitly.
+      KACHE_R2_ENDPOINT: ${{ secrets.KACHE_R2_ENDPOINT }}
+      KACHE_R2_ACCESS_KEY_ID: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
+      KACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
     with:
       source_ref: ${{ needs.tags.outputs.server_tag }}
       server_tag: ${{ needs.tags.outputs.server_tag }}
