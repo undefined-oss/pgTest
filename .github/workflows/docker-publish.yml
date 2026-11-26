@@ -101,12 +101,18 @@ jobs:
         run: |
           rustup show active-toolchain
           rustup target add "$TARGET"
-      # kache caches rustc artifacts via RUSTC_WRAPPER and persists the store
-      # through GitHub Actions cache, keyed per musl target. PR comments are
-      # disabled: this workflow only runs via workflow_call with read-only tokens.
+      # kache caches rustc artifacts via RUSTC_WRAPPER. Same-repository runs
+      # share a Cloudflare R2 remote (kache-pgtest bucket); fork PR runs
+      # cannot see the credentials, so the bucket gate falls back to GitHub
+      # Actions cache, keyed per musl target. PR comments are disabled: this
+      # workflow only runs via workflow_call with read-only tokens.
       - name: Set up kache build cache
         uses: kunobi-ninja/kache-action@v1
         with:
+          s3-bucket: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'kache-pgtest' || '' }}
+          s3-endpoint: ${{ secrets.KACHE_R2_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
           cache-key-prefix: docker-release-${{ matrix.target }}
           pr-comment: false
       - name: Compile and stage static server
