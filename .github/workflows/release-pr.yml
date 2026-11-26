@@ -14,22 +14,27 @@ concurrency:
 
 jobs:
   prepare:
+    name: Prepare release PR
     if: github.repository == 'undefined-oss/pgTest'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/create-github-app-token@v3
+      - uses: actions/create-github-app-token@v3.4.0
         id: app
         with:
           client-id: ${{ vars.RELEASE_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # Scope the app token: release-plz only commits the release PR
+          # branch and opens the pull request.
+          permission-contents: write
+          permission-pull-requests: write
       - uses: rui314/setup-mold@v1
         with:
           make-default: false
-      - uses: release-plz/action@v0.5
+      - uses: release-plz/action@v0.5.148
         with:
           command: release-pr
           version: "0.3.169"

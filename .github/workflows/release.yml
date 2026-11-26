@@ -19,28 +19,29 @@ jobs:
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'release-plz-')
-    uses: ./.github/workflows/tests.yml
+    uses: $/.github/workflows/tests.yml
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read # The reusable Tests workflow needs PR read access.
     with:
       source_sha: ${{ github.event.pull_request.merge_commit_sha }}
 
   tags:
+    name: Tag server releases
     needs: tests
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
-      contents: write
-      pull-requests: read
+      contents: write # release-plz creates the server and internal release tags.
+      pull-requests: read # release-plz reads the release PR for its changelog notes.
     outputs:
       server_tag: ${{ steps.apps.outputs.server_tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: release-plz/action@v0.5
+      - uses: release-plz/action@v0.5.148
         id: release
         with:
           command: release
@@ -57,10 +58,10 @@ jobs:
   docker:
     needs: tags
     if: needs.tags.outputs.server_tag != ''
-    uses: ./.github/workflows/docker-publish.yml
+    uses: $/.github/workflows/docker-publish.yml
     permissions:
       contents: read
-      packages: write
+      packages: write # Publish the release image to ghcr.io.
     with:
       source_ref: ${{ needs.tags.outputs.server_tag }}
       server_tag: ${{ needs.tags.outputs.server_tag }}
