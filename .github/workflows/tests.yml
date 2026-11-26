@@ -72,13 +72,12 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     env:
-      # kache forces untrusted GitHub CI read-only with no override
-      # (kunobi-ninja/kache policy.rs). Every PR in this repository is
-      # same-repo and its write credential is trusted, so blank
-      # GITHUB_ACTIONS for the kache processes: kache then follows the
-      # credentials, like a local shell. Fork PR runs stay locked out —
-      # GitHub withholds the secrets and the bucket input collapses.
-      GITHUB_ACTIONS: ''
+      # kache keeps pull_request CI jobs read-only unless they have a remote
+      # prefix of their own (kache's config clears the forced read-only when
+      # pull_request_prefix resolves). Same-repo PRs then write into their
+      # own namespace and keep restoring from the trusted base prefix; fork
+      # PR runs have no remote at all. Other events ignore the variable.
+      KACHE_PULL_REQUEST_PREFIX: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
