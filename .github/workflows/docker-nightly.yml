@@ -22,7 +22,11 @@ permissions:
 # rolling nightly build.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || (github.event.action == 'labeled' && github.event.label.name == 'benchmark-v1')) && format('docker-nightly-pr-{0}', github.event.pull_request.head.sha) || 'docker-nightly' }}
-  cancel-in-progress: false
+  # A PR created with benchmark-v1 already attached fires both `opened` and
+  # `labeled` within seconds; the later event supersedes the earlier run
+  # instead of duplicating the build and the benchmark dispatch. Rolling
+  # nightlies (merge, comment, dispatch) stay serialized without cancelling.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || (github.event.action == 'labeled' && github.event.label.name == 'benchmark-v1')) }}
 
 jobs:
   resolve:
