@@ -40,9 +40,20 @@ Nightly images publish automatically from three triggers, plus the manual one:
   `nightly-pr-sha` (the most recent PR) and
   `nightly-pr-sha-<12-character-commit>` (that PR's head). Tests are not
   repeated here; the regular Tests workflow already gates the same head sha.
+- **The `benchmark-v1` label is added to an open PR**: the PR head is built
+  and published with the same per-PR tags — the late opt-in that benchmarks
+  a PR that was opened without the label.
 - **A comment on a PR by @Afsoon**: the PR head is tested and published with
   the rolling nightly tags, so `:nightly` points at that PR for reviewing. The
   comment builds the PR author's code, so review the PR before commenting.
+- **A benchmark follows the nightly creation**: when a PR-opened,
+  label-added, or comment nightly publishes successfully, the workflow
+  dispatches the benchmark monorepo (see `benchamark-integraiton.md`) — but
+  only if the PR carries the `benchmark-v1` label. The commit under test is
+  the PR head (`nightly-pr-sha-<sha>` for opened and label-added PRs,
+  `nightly-sha-<sha>` for comment nightlies), compared against the last
+  release and main. Merged-main nightlies dispatch nothing (they would
+  compare main against itself).
 - **Manual dispatch**: open **Actions → Docker nightly → Run workflow**,
   select the branch to build, and click **Run workflow**. The workflow must
   be present on the default branch to appear in the UI and on the selected
