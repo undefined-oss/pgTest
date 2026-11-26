@@ -115,12 +115,6 @@ jobs:
     permissions:
       contents: read
       packages: write # Publish the nightly image to ghcr.io.
-    secrets:
-      # Reusable workflows do not inherit repository secrets; pass the R2
-      # cache configuration explicitly.
-      KACHE_R2_ENDPOINT: ${{ secrets.KACHE_R2_ENDPOINT }}
-      KACHE_R2_ACCESS_KEY_ID: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
-      KACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
     with:
       source_ref: ${{ needs.resolve.outputs.source_ref }}
       pr_build: ${{ needs.resolve.outputs.pr_build == 'true' }}

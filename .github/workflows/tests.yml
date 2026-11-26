@@ -6,16 +6,6 @@ on:
       source_sha:
         type: string
         required: true
-    secrets:
-      KACHE_R2_ENDPOINT:
-        description: R2 S3 endpoint for the kache build cache remote
-        required: false
-      KACHE_R2_ACCESS_KEY_ID:
-        description: R2 access key ID for the kache build cache remote
-        required: false
-      KACHE_R2_SECRET_ACCESS_KEY:
-        description: R2 secret access key for the kache build cache remote
-        required: false
   pull_request:
     types: [opened, synchronize, reopened]
   push:
@@ -81,13 +71,6 @@ jobs:
     if: needs.changed.outputs.run_tests == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
-    env:
-      # kache keeps pull_request CI jobs read-only unless they have a remote
-      # prefix of their own (kache's config clears the forced read-only when
-      # pull_request_prefix resolves). Same-repo PRs then write into their
-      # own namespace and keep restoring from the trusted base prefix; fork
-      # PR runs have no remote at all. Other events ignore the variable.
-      KACHE_PULL_REQUEST_PREFIX: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -110,23 +93,13 @@ jobs:
         with:
           tool: nextest@0.9.152
 
-      # kache caches rustc artifacts via RUSTC_WRAPPER. Same-repository runs
-      # share a Cloudflare R2 remote (kache-pgtest bucket); fork PR runs
-      # cannot see the credentials, so the bucket gate falls back to GitHub
-      # Actions cache. PR comments are disabled because callers of this
-      # reusable workflow grant at most pull-requests: read.
+      # kache caches rustc artifacts via RUSTC_WRAPPER and persists the store
+      # through GitHub Actions cache. PR comments are disabled because callers
+      # of this reusable workflow grant at most pull-requests: read.
       - name: Set up kache build cache
         uses: kunobi-ninja/kache-action@v1
         with:
-          s3-bucket: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'kache-pgtest' || '' }}
-          s3-endpoint: ${{ secrets.KACHE_R2_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
           save-cache: true
-          # The pr-<N> namespace is small, and per-key R2 round-trips dominate
-          # restore time (avg ~565 ms/hit vs 25 s of actual transfer). Bulk-pull
-          # the namespace at setup instead of fetching keys during the build.
-          sync: true
           pr-comment: false
 
       - name: Verify Docker is available
