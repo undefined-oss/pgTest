@@ -71,14 +71,6 @@ jobs:
     if: needs.changed.outputs.run_tests == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
-    env:
-      # kache forces untrusted GitHub CI read-only with no override
-      # (kunobi-ninja/kache policy.rs). Every PR in this repository is
-      # same-repo and its write credential is trusted, so blank
-      # GITHUB_ACTIONS for the kache processes: kache then follows the
-      # credentials, like a local shell. Fork PR runs stay locked out —
-      # GitHub withholds the secrets and the bucket input collapses.
-      GITHUB_ACTIONS: ''
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -101,18 +93,12 @@ jobs:
         with:
           tool: nextest@0.9.152
 
-      # kache caches rustc artifacts via RUSTC_WRAPPER. Same-repository runs
-      # share a Cloudflare R2 remote (kache-pgtest bucket); fork PR runs
-      # cannot see the credentials, so the bucket gate falls back to GitHub
-      # Actions cache. PR comments are disabled because callers of this
-      # reusable workflow grant at most pull-requests: read.
+      # kache caches rustc artifacts via RUSTC_WRAPPER and persists the store
+      # through GitHub Actions cache. PR comments are disabled because callers
+      # of this reusable workflow grant at most pull-requests: read.
       - name: Set up kache build cache
         uses: kunobi-ninja/kache-action@v1
         with:
-          s3-bucket: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'kache-pgtest' || '' }}
-          s3-endpoint: ${{ secrets.KACHE_R2_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
           save-cache: true
           pr-comment: false
 
