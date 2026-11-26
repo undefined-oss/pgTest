@@ -81,6 +81,13 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
+      # kache forces untrusted GitHub CI read-only with no override
+      # (kunobi-ninja/kache policy.rs). Every PR in this repository is
+      # same-repo and its write credential is trusted, so blank
+      # GITHUB_ACTIONS for the kache processes: kache then follows the
+      # credentials, like a local shell. Fork PR runs stay locked out —
+      # GitHub withholds the secrets and the bucket input collapses.
+      GITHUB_ACTIONS: ''
     steps:
       - uses: actions/checkout@v7.0.1
         with:

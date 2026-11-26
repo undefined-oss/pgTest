@@ -99,7 +99,11 @@ via `RUSTC_WRAPPER`. Same-repository runs share a Cloudflare R2 remote
 (the `kache-pgtest` bucket, configured through the `KACHE_R2_*` secrets), so
 test and release builds reuse one content-addressed store across runners;
 fork PR runs cannot see the R2 credentials and fall back to GitHub Actions
-cache, keyed per musl target. Build artifacts expire after one day.
+cache, keyed per musl target. kache normally forces untrusted GitHub CI
+read-only; this repository has a single contributor whose PRs are all
+same-repo, so the kache jobs blank `GITHUB_ACTIONS` and follow the
+credentials, with forks still gated by the empty bucket input. Build
+artifacts expire after one day.
 
 The existing `Dockerfile` still compiles from source for local builds on macOS:
 
