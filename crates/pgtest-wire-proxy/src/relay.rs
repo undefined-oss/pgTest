@@ -177,7 +177,11 @@ mod tests {
 
     #[tokio::test]
     async fn buffered_backpressure_does_not_block_reverse_traffic_or_half_close() {
-        tokio::time::timeout(Duration::from_secs(3), async {
+        // The prefix makes ~8 KiB of one-byte round trips through capacity-1
+        // duplexes, so this is a scheduler stress test: a tight deadline that
+        // passes in isolation flakes under full-suite parallelism. Deadlocks
+        // still trip any timeout, so leave generous headroom.
+        tokio::time::timeout(Duration::from_secs(15), async {
             let (mut client, proxy_client) = tokio::io::duplex(1);
             let (proxy_upstream, mut backend) = tokio::io::duplex(1);
             let mut connection = framed(proxy_client);

@@ -166,10 +166,16 @@ mod tests {
             packet.extend_from_slice(&[0, 3, 0, 0]);
             let mut server = connection(io::Cursor::new(packet));
             let error = super::read(&mut server).await.unwrap_err();
-            assert!(matches!(
-                error,
-                PgWireError::InvalidStartupMessage | PgWireError::MessageTooLarge(..)
-            ));
+            // pgwire 0.42 rejects invalid lengths with a dedicated variant.
+            assert!(
+                matches!(
+                    error,
+                    PgWireError::InvalidStartupMessage
+                        | PgWireError::InvalidMessageLength(..)
+                        | PgWireError::MessageTooLarge(..)
+                ),
+                "length {length}: {error:?}"
+            );
         }
     }
 
