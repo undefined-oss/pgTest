@@ -34,7 +34,7 @@ It supports `linux/amd64` and `linux/arm64`.
 
 Nightly images publish automatically from three triggers, plus the manual one:
 
-- **A PR merges into `main`**: the merge commit is tested and published with
+- **A PR merges into `main`**: the merge commit is published with
   the rolling nightly tags below. Unmerged closed PRs publish nothing.
 - **A PR is opened**: the PR head is published immediately with per-PR tags,
   `nightly-pr-sha` (the most recent PR) and
@@ -43,12 +43,13 @@ Nightly images publish automatically from three triggers, plus the manual one:
 - **The `benchmark-v1` label is added to an open PR**: the PR head is built
   and published with the same per-PR tags — the late opt-in that benchmarks
   a PR that was opened without the label.
-- **A comment on a PR by @Afsoon**: the PR head is tested and published with
-  the rolling nightly tags, so `:nightly` points at that PR for reviewing. The
-  comment builds the PR author's code, so review the PR before commenting.
+- **A `/bench` comment on a PR by @Afsoon**: the PR head is published with
+  the rolling nightly tags, so `:nightly` points at that PR for reviewing.
+  The comment builds the PR author's code, so review the PR before
+  commenting.
 - **A benchmark follows the nightly creation**: when a PR-opened,
-  label-added, or comment nightly publishes successfully, the workflow
-  dispatches the benchmark monorepo (see `benchamark-integraiton.md`) — but
+  label-added, or `/bench`-command nightly publishes successfully, the
+  workflow dispatches the benchmark monorepo — but
   only if the PR carries the `benchmark-v1` label. The commit under test is
   the PR head (`nightly-pr-sha-<sha>` for opened and label-added PRs,
   `nightly-sha-<sha>` for comment nightlies), compared against the last
@@ -59,10 +60,11 @@ Nightly images publish automatically from three triggers, plus the manual one:
   be present on the default branch to appear in the UI and on the selected
   branch to run there.
 
-Rolling nightly builds (merge, comment, dispatch) run the existing tests when
-the selected commit changes `.rs` files, then publish
+Rolling nightly builds (merge, `/bench` comment, dispatch) publish
 `linux/amd64` and `linux/arm64` images to `ghcr.io/<owner>/pgtest`, using the
-repository's current owner. They publish these tags:
+repository's current owner, without running tests — the regular Tests
+workflow gates pushes and merges into `main` on its own trigger. They publish
+these tags:
 
 - `nightly`: the most recently published rolling nightly.
 - `nightly-<branch>`: the latest nightly for that branch; Docker metadata

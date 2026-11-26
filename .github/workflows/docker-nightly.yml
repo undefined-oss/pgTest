@@ -3,13 +3,13 @@ run-name: >-
   Docker nightly — ${{ github.event_name == 'pull_request' &&
   format('PR #{0} {1}', github.event.pull_request.number, github.event.action) ||
   github.event_name == 'issue_comment' &&
-  format('PR #{0} comment', github.event.issue.number) || github.ref_name }}
+  format('PR #{0} /bench', github.event.issue.number) || github.ref_name }}
 
 on:
   workflow_dispatch:
   pull_request:
     types: [opened, closed, labeled]
-  issue_comment: # zizmor: ignore[dangerous-triggers] gated to Afsoon's comments; builds reviewed PR heads with read-only tokens
+  issue_comment: # zizmor: ignore[dangerous-triggers] gated to /bench commands by Afsoon; builds reviewed PR heads with read-only tokens
     types: [created]
 
 permissions:
@@ -31,9 +31,9 @@ concurrency:
 jobs:
   resolve:
     name: Resolve nightly trigger
-    # Rolling nightly builds: manual dispatch, a PR merged into main, or a PR
-    # comment by Afsoon. Per-PR builds: a PR was opened, or the benchmark-v1
-    # label was added to an open PR.
+    # Rolling nightly builds: manual dispatch, a PR merged into main, or a
+    # /bench command by Afsoon. Per-PR builds: a PR was opened, or the
+    # benchmark-v1 label was added to an open PR.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && github.event.action == 'opened') ||
@@ -45,7 +45,8 @@ jobs:
         github.event.pull_request.base.ref == 'main') ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
-        github.event.comment.user.login == 'Afsoon')
+        github.event.comment.user.login == 'Afsoon' &&
+        github.event.comment.body == '/bench')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       source_ref: ${{ steps.resolve.outputs.source_ref }}
@@ -82,7 +83,8 @@ jobs:
               pr_build=false
               ;;
             issue_comment/created)
-              # Comment on a PR: build the PR head as the rolling nightly.
+              # A /bench command on a PR: build the PR head as the rolling
+              # nightly.
               source_ref=$(curl -fsSL \
                 -H "Authorization: Bearer $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
@@ -104,26 +106,11 @@ jobs:
             echo "pr_build=$pr_build"
           } >> "$GITHUB_OUTPUT"
 
-  tests:
-    needs: resolve
-    # Per-PR builds skip tests here: the Tests workflow already gates the same
-    # head sha on its own pull_request trigger. Rolling nightly builds (merge,
-    # comment, dispatch) publish the shared :nightly tag, so they run tests
-    # first and stay gated within this workflow.
-    if: needs.resolve.outputs.pr_build != 'true'
-    uses: $/.github/workflows/tests.yml
-    permissions:
-      contents: read
-      pull-requests: read # The reusable Tests workflow needs PR read access.
-    with:
-      source_sha: ${{ needs.resolve.outputs.source_ref }}
-
   docker:
-    needs: [resolve, tests]
+    needs: resolve
     if: >-
       !cancelled() &&
-      needs.resolve.result == 'success' &&
-      (needs.tests.result == 'success' || needs.tests.result == 'skipped')
+      needs.resolve.result == 'success'
     uses: $/.github/workflows/docker-publish.yml
     permissions:
       contents: read
@@ -135,11 +122,12 @@ jobs:
   benchmark:
     name: Dispatch the benchmark for the new nightly images
     needs: [resolve, docker]
-    # Only per-PR nightlies (PR opened, benchmark-v1 label added, or Afsoon's
-    # comment) carry a pgTest commit worth benchmarking; merged-main nightlies
-    # would compare main against itself. The images were just published by
-    # the docker job, so the dispatch cannot race the registry. The PR must
-    # carry the benchmark-v1 label; anything else skips the benchmark.
+    # Only per-PR nightlies (PR opened, benchmark-v1 label added, or a /bench
+    # command by Afsoon) carry a pgTest commit worth benchmarking;
+    # merged-main nightlies would compare main against itself. The images were
+    # just published by the docker job, so the dispatch cannot race the
+    # registry. The PR must carry the benchmark-v1 label; anything else skips
+    # the benchmark.
     if: >-
       !cancelled() &&
       needs.docker.result == 'success' &&
@@ -148,7 +136,8 @@ jobs:
         github.event.label.name == 'benchmark-v1') ||
        (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
-        github.event.comment.user.login == 'Afsoon'))
+        github.event.comment.user.login == 'Afsoon' &&
+        github.event.comment.body == '/bench'))
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
