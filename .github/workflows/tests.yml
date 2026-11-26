@@ -31,14 +31,14 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read # dorny/paths-filter reads the PR diff through the API.
     outputs:
       run_tests: ${{ steps.filter.outputs.run_tests }}
     steps:
       # Pull request changes are read through the API, without a checkout.
       - name: Check out repository
         if: github.event_name != 'pull_request'
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           fetch-depth: 0
@@ -54,7 +54,7 @@ jobs:
           fi
 
       - name: Examine changed files
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v3.0.4
         id: filter
         with:
           # For pushes, compare with the previous push on this branch.
@@ -73,7 +73,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
@@ -81,6 +81,7 @@ jobs:
       - name: Install mold
         uses: rui314/setup-mold@v1
         with:
+          mold-version: '3.0.0'
           # The workspace already selects mold in .cargo/config.toml.
           make-default: false
 
@@ -88,12 +89,17 @@ jobs:
         run: rustup show
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.90.10
         with:
-          tool: nextest@0.9
+          tool: nextest@0.9.152
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # kache caches rustc artifacts via RUSTC_WRAPPER and persists the store
+      # through GitHub Actions cache. PR comments are disabled because callers
+      # of this reusable workflow grant at most pull-requests: read.
+      - name: Set up kache build cache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          pr-comment: false
 
       - name: Verify Docker is available
         run: docker info

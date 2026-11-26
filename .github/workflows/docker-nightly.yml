@@ -1,31 +1,124 @@
 name: Docker nightly
-run-name: Docker nightly from ${{ github.ref_name }}
+run-name: >-
+  Docker nightly — ${{ github.event_name == 'pull_request' &&
+  format('PR #{0} {1}', github.event.pull_request.number, github.event.action) ||
+  github.event_name == 'issue_comment' &&
+  format('PR #{0} comment', github.event.issue.number) || github.ref_name }}
 
 on:
   workflow_dispatch:
+  pull_request:
+    types: [opened, closed]
+  issue_comment: # zizmor: ignore[dangerous-triggers] gated to Afsoon's comments; builds reviewed PR heads with read-only tokens
+    types: [created]
 
 permissions:
   contents: read
+  pull-requests: read # Resolve PR head SHAs for comment- and merge-triggered builds.
 
-# Serialize publication because every branch updates the shared nightly tag.
+# Only builds that write the shared :nightly tag need to be serialized.
+# Per-PR builds publish unique nightly-pr-sha tags, so they get their own
+# concurrency group and never queue behind (or get queued behind by) a
+# rolling nightly build.
 concurrency:
-  group: docker-nightly
+  group: ${{ github.event_name == 'pull_request' && github.event.action == 'opened' && format('docker-nightly-pr-{0}', github.event.pull_request.head.sha) || 'docker-nightly' }}
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    name: Resolve nightly trigger
+    # Rolling nightly builds: manual dispatch, a PR merged into main, or a PR
+    # comment by Afsoon. Per-PR build: a PR was opened.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.action == 'opened') ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'main') ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.comment.user.login == 'Afsoon')
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
+      pr_build: ${{ steps.resolve.outputs.pr_build }}
+    steps:
+      - name: Resolve source and tag mode
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          GITHUB_SHA: ${{ github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          case "$EVENT_NAME/$EVENT_ACTION" in
+            workflow_dispatch/)
+              # Build the dispatched branch head.
+              source_ref="$GITHUB_SHA"
+              pr_build=false
+              ;;
+            pull_request/opened)
+              # Per-PR nightly tags, built from the PR head.
+              source_ref="$PR_HEAD"
+              pr_build=true
+              ;;
+            pull_request/closed)
+              # Merged into main: build the merge commit.
+              source_ref="$MERGE_SHA"
+              pr_build=false
+              ;;
+            issue_comment/created)
+              # Comment on a PR: build the PR head as the rolling nightly.
+              source_ref=$(curl -fsSL \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" |
+                jq -r '.head.sha')
+              pr_build=false
+              ;;
+            *)
+              echo "Unhandled trigger: $EVENT_NAME/$EVENT_ACTION" >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "$source_ref" ] || [ "$source_ref" = "null" ]; then
+            echo "Could not resolve a commit for this trigger." >&2
+            exit 1
+          fi
+          {
+            echo "source_ref=$source_ref"
+            echo "pr_build=$pr_build"
+          } >> "$GITHUB_OUTPUT"
+
   tests:
-    uses: ./.github/workflows/tests.yml
+    needs: resolve
+    # Per-PR builds skip tests here: the Tests workflow already gates the same
+    # head sha on its own pull_request trigger. Rolling nightly builds (merge,
+    # comment, dispatch) publish the shared :nightly tag, so they run tests
+    # first and stay gated within this workflow.
+    if: needs.resolve.outputs.pr_build != 'true'
+    uses: $/.github/workflows/tests.yml
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read # The reusable Tests workflow needs PR read access.
     with:
-      source_sha: ${{ github.sha }}
+      source_sha: ${{ needs.resolve.outputs.source_ref }}
 
   docker:
-    needs: tests
-    uses: ./.github/workflows/docker-publish.yml
+    needs: [resolve, tests]
+    if: >-
+      !cancelled() &&
+      needs.resolve.result == 'success' &&
+      (needs.tests.result == 'success' || needs.tests.result == 'skipped')
+    uses: $/.github/workflows/docker-publish.yml
     permissions:
       contents: read
-      packages: write
+      packages: write # Publish the nightly image to ghcr.io.
     with:
-      source_ref: ${{ github.sha }}
+      source_ref: ${{ needs.resolve.outputs.source_ref }}
+      pr_build: ${{ needs.resolve.outputs.pr_build == 'true' }}

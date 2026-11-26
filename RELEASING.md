@@ -30,24 +30,40 @@ with `sha-<12-character-commit>` (recommended) and `v<server-version>` tags for
 the same multi-platform image.
 It supports `linux/amd64` and `linux/arm64`.
 
-## Manual Docker nightly
+## Docker nightly
 
-Open **Actions → Docker nightly → Run workflow**, select the branch to build,
-and click **Run workflow**. The workflow must be present on the default branch
-to appear in the UI and on the selected branch to run there.
+Nightly images publish automatically from three triggers, plus the manual one:
 
-The workflow runs the existing tests when the selected commit changes `.rs`
-files, then publishes
+- **A PR merges into `main`**: the merge commit is tested and published with
+  the rolling nightly tags below. Unmerged closed PRs publish nothing.
+- **A PR is opened**: the PR head is published immediately with per-PR tags,
+  `nightly-pr-sha` (the most recent PR) and
+  `nightly-pr-sha-<12-character-commit>` (that PR's head). Tests are not
+  repeated here; the regular Tests workflow already gates the same head sha.
+- **A comment on a PR by @Afsoon**: the PR head is tested and published with
+  the rolling nightly tags, so `:nightly` points at that PR for reviewing. The
+  comment builds the PR author's code, so review the PR before commenting.
+- **Manual dispatch**: open **Actions → Docker nightly → Run workflow**,
+  select the branch to build, and click **Run workflow**. The workflow must
+  be present on the default branch to appear in the UI and on the selected
+  branch to run there.
+
+Rolling nightly builds (merge, comment, dispatch) run the existing tests when
+the selected commit changes `.rs` files, then publish
 `linux/amd64` and `linux/arm64` images to `ghcr.io/<owner>/pgtest`, using the
-repository's current owner. It publishes these tags:
+repository's current owner. They publish these tags:
 
-- `nightly`: the most recently published manual nightly from any branch.
-- `nightly-<branch>`: the latest nightly for that branch; Docker metadata replaces
-  unsupported tag characters, such as `/`, with `-`.
+- `nightly`: the most recently published rolling nightly.
+- `nightly-<branch>`: the latest nightly for that branch; Docker metadata
+  replaces unsupported tag characters, such as `/`, with `-`.
 - `nightly-sha-<12-character-commit>`: the image for the selected commit.
 
-Versioned release tags are unchanged. This workflow has no automatic schedule.
-To trigger it from the CLI:
+Per-PR builds publish only the `nightly-pr-sha` tags. Builds that write the
+shared `nightly` tag are serialized; per-PR builds run in their own
+concurrency group so they never queue behind a rolling nightly.
+
+Versioned release tags are unchanged. There is no automatic schedule. To
+trigger a manual nightly from the CLI:
 
 ```sh
 gh workflow run docker-nightly.yml --ref your-branch
@@ -64,9 +80,10 @@ writable `/tmp` directory across artifact transfer.
 
 After both builds succeed, a packaging job uses `Dockerfile.cd` to copy the
 prepared files into one image per architecture and publish a multi-platform
-image. Packaging requires no QEMU or Docker build cache. Cargo dependencies and
-compiled dependency artifacts use `Swatinem/rust-cache`, with separate musl
-release cache keys per architecture. Build artifacts expire after one day.
+image. Packaging requires no QEMU or Docker build cache. Rust compilation goes
+through kache (`kunobi-ninja/kache-action`), which caches compiler artifacts
+via `RUSTC_WRAPPER` and persists them through GitHub Actions cache with a
+separate key prefix per musl target. Build artifacts expire after one day.
 
 The existing `Dockerfile` still compiles from source for local builds on macOS:
 
@@ -79,6 +96,25 @@ docker build -t pgtest:local .
 `tmp/` (mode `1777`). `scripts/docker-build.sh build` prepares those files;
 `PGTEST_OUTPUT_DIR` selects the output directory and defaults to `/out` for the
 local Docker build. Linker flags remain in `.cargo/config.toml`.
+
+## Workflow dependency locking
+
+Every action reference in the workflows is locked by
+`.github/workflows/actions.lock`, generated with `gh actions-lock` (the
+`github/gh-actions-lock` GitHub CLI extension). The runner executes the commit
+recorded in the lockfile even if a tag later moves, including transitive
+composite-action dependencies. The `Verify actions lockfile` workflow fails
+when the lockfile is out of sync with the workflows or a locked commit no
+longer verifies upstream.
+
+After adding a workflow or changing any `uses:` line, run `gh actions-lock`
+and commit the workflow and lockfile together. Reusable workflows in this
+repository are called with the self-repository `$/` syntax, which resolves to
+the repository at the running commit and needs no lockfile entry.
+
+`zizmor` audits the workflows. The one intentional exception — the
+`issue_comment` nightly trigger, which is gated to a single maintainer's
+comments — carries an inline ignore comment at its definition.
 
 ## Validation and retries
 

@@ -27,6 +27,7 @@
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
+!.github/workflows/actions.lock
 
 # allowlist `crates` directories and their children, regardless of place
 !crates/
