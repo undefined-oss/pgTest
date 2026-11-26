@@ -113,6 +113,7 @@ jobs:
           s3-endpoint: ${{ secrets.KACHE_R2_ENDPOINT }}
           s3-access-key-id: ${{ secrets.KACHE_R2_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_R2_SECRET_ACCESS_KEY }}
+          save-cache: true
           cache-key-prefix: docker-release-${{ matrix.target }}
           pr-comment: false
       - name: Compile and stage static server
