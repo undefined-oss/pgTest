@@ -95,15 +95,9 @@ After both builds succeed, a packaging job uses `Dockerfile.cd` to copy the
 prepared files into one image per architecture and publish a multi-platform
 image. Packaging requires no QEMU or Docker build cache. Rust compilation goes
 through kache (`kunobi-ninja/kache-action`), which caches compiler artifacts
-via `RUSTC_WRAPPER`. Same-repository runs share a Cloudflare R2 remote
-(the `kache-pgtest` bucket, configured through the `KACHE_R2_*` secrets), so
-test and release builds reuse one content-addressed store across runners;
-fork PR runs cannot see the R2 credentials and fall back to GitHub Actions
-cache, keyed per musl target. kache normally forces untrusted GitHub CI
-read-only; this repository has a single contributor whose PRs are all
-same-repo, so the kache jobs blank `GITHUB_ACTIONS` and follow the
-credentials, with forks still gated by the empty bucket input. Build
-artifacts expire after one day.
+via `RUSTC_WRAPPER` and persists the store through GitHub Actions cache
+(the repo-wide cache size limit applies), with a separate key prefix per
+musl target. Build artifacts expire after one day.
 
 The existing `Dockerfile` still compiles from source for local builds on macOS:
 
